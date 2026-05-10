@@ -284,7 +284,7 @@ aws rds create-db-instance \
   --db-instance-identifier ce-408-postgres \
   --db-instance-class db.t4g.micro \
   --engine postgres --engine-version 16.3 \
-  --master-username ce-408admin \
+  --master-username ce408admin \
   --master-user-password "$DB_PASSWORD" \
   --allocated-storage 20 --storage-type gp3 \
   --vpc-security-group-ids $RDS_SG \
