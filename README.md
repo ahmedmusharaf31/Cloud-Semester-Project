@@ -48,7 +48,7 @@ If your viva is more than a week away, **use Strategy B**. The 30-minute resume 
 ### 1.1 AWS account setup (do this once, before anything else)
 
 1. Sign in to AWS as the root user → IAM → create an admin IAM user
-   (`ce408-admin`), generate access keys, store in your password manager.
+   (`ce-408-admin`), generate access keys, store in your password manager.
 2. **Enable a Budget alert immediately**, before you create any resources:
    - AWS Budgets → Create budget → Use a template → "Monthly cost budget"
    - Amount: `$10` (warning) and a second at `$25` (alarm)
@@ -85,14 +85,14 @@ aws configure
 
 ### 1.3 Conventions used in this README
 
-- All resources tagged `Project=ce408` so cleanup is one filter away.
+- All resources tagged `Project=ce-408` so cleanup is one filter away.
 - Shell snippets are **bash** (works in Git Bash on Windows). For PowerShell
   replace `$VAR` with `$env:VAR` and trailing `\` with backtick `` ` ``.
 - Variables you'll set once at the top of every shell session:
 
 ```bash
 export AWS_REGION=us-east-1
-export PROJECT=ce408
+export PROJECT=ce-408
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export TAG="Key=Project,Value=$PROJECT"
 ```
@@ -137,7 +137,7 @@ Use the AWS Console wizard for speed (this is a one-time thing):
 
 **Console** → VPC → "Create VPC" → "VPC and more":
 
-- Name tag prefix: `ce408`
+- Name tag prefix: `ce-408`
 - IPv4 CIDR: `10.0.0.0/16`
 - Number of AZs: `2`
 - Public subnets: `2`, Private subnets: `2`
@@ -149,7 +149,7 @@ Then tag the VPC:
 
 ```bash
 VPC_ID=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=ce408-vpc" \
+  --filters "Name=tag:Name,Values=ce-408-vpc" \
   --query "Vpcs[0].VpcId" --output text)
 aws ec2 create-tags --resources $VPC_ID --tags $TAG
 ```
@@ -177,21 +177,21 @@ Three SGs, chained so each only allows the previous tier:
 
 ```bash
 # ALB SG — open 80 to internet
-ALB_SG=$(aws ec2 create-security-group --group-name ce408-alb-sg \
+ALB_SG=$(aws ec2 create-security-group --group-name ce-408-alb-sg \
   --description "ALB ingress" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $ALB_SG \
   --protocol tcp --port 80 --cidr 0.0.0.0/0
 aws ec2 create-tags --resources $ALB_SG --tags $TAG
 
 # Service SG — only ALB can reach 8000
-SVC_SG=$(aws ec2 create-security-group --group-name ce408-svc-sg \
+SVC_SG=$(aws ec2 create-security-group --group-name ce-408-svc-sg \
   --description "Fargate services" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $SVC_SG \
   --protocol tcp --port 8000 --source-group $ALB_SG
 aws ec2 create-tags --resources $SVC_SG --tags $TAG
 
 # RDS SG — only services can reach 5432
-RDS_SG=$(aws ec2 create-security-group --group-name ce408-rds-sg \
+RDS_SG=$(aws ec2 create-security-group --group-name ce-408-rds-sg \
   --description "RDS Postgres" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $RDS_SG \
   --protocol tcp --port 5432 --source-group $SVC_SG
@@ -215,27 +215,27 @@ cat > trust-ecs.json <<'EOF'
   { "Effect": "Allow", "Principal": { "Service": "ecs-tasks.amazonaws.com" },
     "Action": "sts:AssumeRole" } ] }
 EOF
-aws iam create-role --role-name ce408-ecs-exec \
+aws iam create-role --role-name ce-408-ecs-exec \
   --assume-role-policy-document file://trust-ecs.json
-aws iam attach-role-policy --role-name ce408-ecs-exec \
+aws iam attach-role-policy --role-name ce-408-ecs-exec \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
 # Task role — what the running container can do
-aws iam create-role --role-name ce408-task-role \
+aws iam create-role --role-name ce-408-task-role \
   --assume-role-policy-document file://trust-ecs.json
 # Inline policy: DynamoDB on cart-sessions, SQS on orders-fulfilment
 cat > task-policy.json <<EOF
 { "Version": "2012-10-17", "Statement": [
   { "Effect": "Allow",
     "Action": ["dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:DeleteItem"],
-    "Resource": "arn:aws:dynamodb:$AWS_REGION:$ACCOUNT_ID:table/ce408-cart-sessions" },
+    "Resource": "arn:aws:dynamodb:$AWS_REGION:$ACCOUNT_ID:table/ce-408-cart-sessions" },
   { "Effect": "Allow",
     "Action": ["sqs:SendMessage","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],
-    "Resource": "arn:aws:sqs:$AWS_REGION:$ACCOUNT_ID:ce408-orders-fulfilment" }
+    "Resource": "arn:aws:sqs:$AWS_REGION:$ACCOUNT_ID:ce-408-orders-fulfilment" }
 ] }
 EOF
-aws iam put-role-policy --role-name ce408-task-role \
-  --policy-name ce408-task-inline --policy-document file://task-policy.json
+aws iam put-role-policy --role-name ce-408-task-role \
+  --policy-name ce-408-task-inline --policy-document file://task-policy.json
 
 # (No FIS role — chaos is scripted via direct ECS API calls; see Phase 8)
 ```
@@ -244,7 +244,7 @@ aws iam put-role-policy --role-name ce408-task-role \
 
 ```bash
 for svc in catalog cart orders; do
-  aws ecr create-repository --repository-name ce408/$svc \
+  aws ecr create-repository --repository-name ce-408/$svc \
     --image-scanning-configuration scanOnPush=true \
     --tags Key=Project,Value=$PROJECT
 done
@@ -255,7 +255,7 @@ done
 ```bash
 aws ec2 describe-vpcs --filters "Name=tag:Project,Values=$PROJECT"
 aws ecr describe-repositories --query "repositories[].repositoryName"
-aws iam list-roles --query "Roles[?starts_with(RoleName,'ce408')].RoleName"
+aws iam list-roles --query "Roles[?starts_with(RoleName,'ce-408')].RoleName"
 ```
 
 You should see one VPC, three ECR repos, and two IAM roles.
@@ -269,26 +269,26 @@ You should see one VPC, three ECR repos, and two IAM roles.
 ```bash
 # DB subnet group across the 2 private subnets
 aws rds create-db-subnet-group \
-  --db-subnet-group-name ce408-db-subnets \
-  --db-subnet-group-description "ce408 RDS subnets" \
+  --db-subnet-group-name ce-408-db-subnets \
+  --db-subnet-group-description "ce-408 RDS subnets" \
   --subnet-ids $PRIV_SUBNET_1 $PRIV_SUBNET_2 \
   --tags Key=Project,Value=$PROJECT
 
 # Generate and store a strong password
 DB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-aws ssm put-parameter --name /ce408/rds/password --type SecureString \
+aws ssm put-parameter --name /ce-408/rds/password --type SecureString \
   --value "$DB_PASSWORD" --overwrite
 
 # Create the instance — single AZ, no multi-AZ, smallest burstable
 aws rds create-db-instance \
-  --db-instance-identifier ce408-postgres \
+  --db-instance-identifier ce-408-postgres \
   --db-instance-class db.t4g.micro \
   --engine postgres --engine-version 16.3 \
-  --master-username ce408admin \
+  --master-username ce-408admin \
   --master-user-password "$DB_PASSWORD" \
   --allocated-storage 20 --storage-type gp3 \
   --vpc-security-group-ids $RDS_SG \
-  --db-subnet-group-name ce408-db-subnets \
+  --db-subnet-group-name ce-408-db-subnets \
   --no-publicly-accessible \
   --backup-retention-period 1 \
   --tags Key=Project,Value=$PROJECT
@@ -297,8 +297,8 @@ aws rds create-db-instance \
 Wait ~10–15 min for status `available`:
 
 ```bash
-aws rds wait db-instance-available --db-instance-identifier ce408-postgres
-RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce408-postgres \
+aws rds wait db-instance-available --db-instance-identifier ce-408-postgres
+RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-postgres \
   --query "DBInstances[0].Endpoint.Address" --output text)
 echo $RDS_ENDPOINT
 ```
@@ -350,15 +350,15 @@ CREATE TABLE order_items (
 Run after k6 EC2 is up (§9):
 
 ```bash
-ssh -i ce408-k6.pem ec2-user@$K6_PUBLIC_IP \
-  "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce408admin -f -" < bootstrap.sql
+ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP \
+  "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce-408admin -f -" < bootstrap.sql
 ```
 
 ### 4.3 DynamoDB
 
 ```bash
 aws dynamodb create-table \
-  --table-name ce408-cart-sessions \
+  --table-name ce-408-cart-sessions \
   --billing-mode PAY_PER_REQUEST \
   --attribute-definitions AttributeName=userId,AttributeType=S \
   --key-schema AttributeName=userId,KeyType=HASH \
@@ -370,7 +370,7 @@ PAY_PER_REQUEST means **$0 when idle** — leave it running across pauses.
 ### 4.4 SQS
 
 ```bash
-ORDERS_QUEUE_URL=$(aws sqs create-queue --queue-name ce408-orders-fulfilment \
+ORDERS_QUEUE_URL=$(aws sqs create-queue --queue-name ce-408-orders-fulfilment \
   --attributes VisibilityTimeout=60,MessageRetentionPeriod=345600 \
   --tags Project=$PROJECT --query QueueUrl --output text)
 aws sqs tag-queue --queue-url $ORDERS_QUEUE_URL --tags Project=$PROJECT
@@ -382,9 +382,9 @@ Same — pay-per-request, $0 idle.
 ### 4.5 Store endpoints in SSM (so containers can find them)
 
 ```bash
-aws ssm put-parameter --name /ce408/rds/endpoint --type String --value "$RDS_ENDPOINT" --overwrite
-aws ssm put-parameter --name /ce408/sqs/orders-url --type String --value "$ORDERS_QUEUE_URL" --overwrite
-aws ssm put-parameter --name /ce408/dynamodb/cart-table --type String --value "ce408-cart-sessions" --overwrite
+aws ssm put-parameter --name /ce-408/rds/endpoint --type String --value "$RDS_ENDPOINT" --overwrite
+aws ssm put-parameter --name /ce-408/sqs/orders-url --type String --value "$ORDERS_QUEUE_URL" --overwrite
+aws ssm put-parameter --name /ce-408/dynamodb/cart-table --type String --value "ce-408-cart-sessions" --overwrite
 ```
 
 ---
@@ -396,7 +396,7 @@ aws ssm put-parameter --name /ce408/dynamodb/cart-table --type String --value "c
 Create one local repo with all three services:
 
 ```
-ce408-services/
+ce-408-services/
 ├── catalog/
 │   ├── app/main.py
 │   ├── app/db.py
@@ -423,7 +423,7 @@ async def get_pool():
     if _pool is None:
         _pool = await asyncpg.create_pool(
             host=os.environ["DB_HOST"], database="catalog",
-            user="ce408admin", password=os.environ["DB_PASSWORD"],
+            user="ce-408admin", password=os.environ["DB_PASSWORD"],
             min_size=1, max_size=4)
     return _pool
 
@@ -483,9 +483,9 @@ aws ecr get-login-password --region $AWS_REGION | \
   docker login --username AWS --password-stdin $REGISTRY
 for svc in catalog cart orders; do
   echo "=== Building $svc ==="
-  docker build -t ce408/$svc:latest ./$svc
-  docker tag ce408/$svc:latest $REGISTRY/ce408/$svc:latest
-  docker push $REGISTRY/ce408/$svc:latest
+  docker build -t ce-408/$svc:latest ./$svc
+  docker tag ce-408/$svc:latest $REGISTRY/ce-408/$svc:latest
+  docker push $REGISTRY/ce-408/$svc:latest
 done
 ```
 
@@ -501,7 +501,7 @@ chmod +x scripts/build-and-push.sh
 ```bash
 docker run --rm -p 8000:8000 \
   -e DB_HOST=host.docker.internal -e DB_PASSWORD=dummy \
-  ce408/catalog:latest
+  ce-408/catalog:latest
 curl http://localhost:8000/healthz   # → {"ok":true}
 ```
 
@@ -512,7 +512,7 @@ curl http://localhost:8000/healthz   # → {"ok":true}
 ### 6.1 ECS cluster
 
 ```bash
-aws ecs create-cluster --cluster-name ce408-cluster \
+aws ecs create-cluster --cluster-name ce-408-cluster \
   --capacity-providers FARGATE \
   --tags key=Project,value=$PROJECT
 ```
@@ -520,8 +520,8 @@ aws ecs create-cluster --cluster-name ce408-cluster \
 CloudWatch log group:
 
 ```bash
-aws logs create-log-group --log-group-name /ecs/ce408
-aws logs put-retention-policy --log-group-name /ecs/ce408 --retention-in-days 7
+aws logs create-log-group --log-group-name /ecs/ce-408
+aws logs put-retention-policy --log-group-name /ecs/ce-408 --retention-in-days 7
 ```
 
 ### 6.2 Task definitions
@@ -530,20 +530,20 @@ aws logs put-retention-policy --log-group-name /ecs/ce408 --retention-in-days 7
 
 ```json
 {
-  "family": "ce408-catalog",
+  "family": "ce-408-catalog",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ce408-ecs-exec",
-  "taskRoleArn":      "arn:aws:iam::ACCOUNT_ID:role/ce408-task-role",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ce-408-ecs-exec",
+  "taskRoleArn":      "arn:aws:iam::ACCOUNT_ID:role/ce-408-task-role",
   "containerDefinitions": [{
     "name": "app",
-    "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/ce408/catalog:latest",
+    "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/ce-408/catalog:latest",
     "essential": true,
     "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
     "secrets": [
-      {"name":"DB_PASSWORD","valueFrom":"arn:aws:ssm:us-east-1:ACCOUNT_ID:parameter/ce408/rds/password"}
+      {"name":"DB_PASSWORD","valueFrom":"arn:aws:ssm:us-east-1:ACCOUNT_ID:parameter/ce-408/rds/password"}
     ],
     "environment": [
       {"name":"DB_HOST","value":"RDS_ENDPOINT_HERE"}
@@ -551,7 +551,7 @@ aws logs put-retention-policy --log-group-name /ecs/ce408 --retention-in-days 7
     "logConfiguration": {
       "logDriver": "awslogs",
       "options": {
-        "awslogs-group": "/ecs/ce408",
+        "awslogs-group": "/ecs/ce-408",
         "awslogs-region": "us-east-1",
         "awslogs-stream-prefix": "catalog"
       }
@@ -571,7 +571,7 @@ aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
 You'll also need to allow the execution role to read SSM:
 
 ```bash
-aws iam attach-role-policy --role-name ce408-ecs-exec \
+aws iam attach-role-policy --role-name ce-408-ecs-exec \
   --policy-arn arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
 ```
 
@@ -579,7 +579,7 @@ aws iam attach-role-policy --role-name ce408-ecs-exec \
 
 ```bash
 ALB_ARN=$(aws elbv2 create-load-balancer \
-  --name ce408-alb --type application --scheme internet-facing \
+  --name ce-408-alb --type application --scheme internet-facing \
   --subnets $PUB_SUBNET_1 $PUB_SUBNET_2 \
   --security-groups $ALB_SG \
   --tags Key=Project,Value=$PROJECT \
@@ -587,15 +587,15 @@ ALB_ARN=$(aws elbv2 create-load-balancer \
 
 # Three target groups
 for svc in catalog cart orders; do
-  aws elbv2 create-target-group --name ce408-$svc-tg \
+  aws elbv2 create-target-group --name ce-408-$svc-tg \
     --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip \
     --health-check-path /healthz --health-check-interval-seconds 15 \
     --tags Key=Project,Value=$PROJECT
 done
 
-CATALOG_TG=$(aws elbv2 describe-target-groups --names ce408-catalog-tg --query "TargetGroups[0].TargetGroupArn" --output text)
-CART_TG=$(aws elbv2 describe-target-groups   --names ce408-cart-tg    --query "TargetGroups[0].TargetGroupArn" --output text)
-ORDERS_TG=$(aws elbv2 describe-target-groups --names ce408-orders-tg  --query "TargetGroups[0].TargetGroupArn" --output text)
+CATALOG_TG=$(aws elbv2 describe-target-groups --names ce-408-catalog-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+CART_TG=$(aws elbv2 describe-target-groups   --names ce-408-cart-tg    --query "TargetGroups[0].TargetGroupArn" --output text)
+ORDERS_TG=$(aws elbv2 describe-target-groups --names ce-408-orders-tg  --query "TargetGroups[0].TargetGroupArn" --output text)
 
 # Default listener returns 404; rules route by path
 LISTENER_ARN=$(aws elbv2 create-listener --load-balancer-arn $ALB_ARN \
@@ -621,9 +621,9 @@ for svc in catalog cart orders; do
   TG_VAR=$(echo ${svc}_TG | tr '[:lower:]' '[:upper:]')
   TG_ARN=$(eval echo \$$TG_VAR)
   aws ecs create-service \
-    --cluster ce408-cluster \
-    --service-name ce408-$svc \
-    --task-definition ce408-$svc \
+    --cluster ce-408-cluster \
+    --service-name ce-408-$svc \
+    --task-definition ce-408-$svc \
     --desired-count 1 --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[$PRIV_SUBNET_1,$PRIV_SUBNET_2],securityGroups=[$SVC_SG],assignPublicIp=DISABLED}" \
     --load-balancers "targetGroupArn=$TG_ARN,containerName=app,containerPort=8000" \
@@ -635,8 +635,8 @@ done
 Wait for them to stabilize (5–10 min):
 
 ```bash
-aws ecs wait services-stable --cluster ce408-cluster \
-  --services ce408-catalog ce408-cart ce408-orders
+aws ecs wait services-stable --cluster ce-408-cluster \
+  --services ce-408-catalog ce-408-cart ce-408-orders
 ```
 
 ### 6.5 Auto-scaling (CPU target tracking)
@@ -645,13 +645,13 @@ aws ecs wait services-stable --cluster ce408-cluster \
 for svc in catalog cart orders; do
   aws application-autoscaling register-scalable-target \
     --service-namespace ecs \
-    --resource-id service/ce408-cluster/ce408-$svc \
+    --resource-id service/ce-408-cluster/ce-408-$svc \
     --scalable-dimension ecs:service:DesiredCount \
     --min-capacity 1 --max-capacity 4
 
   aws application-autoscaling put-scaling-policy \
     --service-namespace ecs \
-    --resource-id service/ce408-cluster/ce408-$svc \
+    --resource-id service/ce-408-cluster/ce-408-$svc \
     --scalable-dimension ecs:service:DesiredCount \
     --policy-name cpu60 --policy-type TargetTrackingScaling \
     --target-tracking-scaling-policy-configuration '{
@@ -666,7 +666,7 @@ done
 ### 6.6 Smoke test the live stack
 
 ```bash
-ALB_DNS=$(aws elbv2 describe-load-balancers --names ce408-alb \
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].DNSName" --output text)
 
 curl http://$ALB_DNS/catalog/products
@@ -710,11 +710,11 @@ Rebuild and force a new deployment so the running tasks pick up the change:
 ```bash
 ./scripts/build-and-push.sh
 for svc in catalog cart orders; do
-  aws ecs update-service --cluster ce408-cluster --service ce408-$svc \
+  aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc \
     --force-new-deployment
 done
-aws ecs wait services-stable --cluster ce408-cluster \
-  --services ce408-catalog ce408-cart ce408-orders
+aws ecs wait services-stable --cluster ce-408-cluster \
+  --services ce-408-catalog ce-408-cart ce-408-orders
 ```
 
 ### 7.2 Required API contract
@@ -1040,15 +1040,15 @@ Save this as a single file. Leave `__ALB_DNS__` as-is — the deploy script in
 
 <script>
   const API = (location.search.match(/api=([^&]+)/) || [])[1]
-            || localStorage.getItem('ce408_api')
+            || localStorage.getItem('ce-408_api')
             || prompt('Enter ALB DNS (no http://, no trailing slash):', '__ALB_DNS__');
-  if (API) localStorage.setItem('ce408_api', API);
+  if (API) localStorage.setItem('ce-408_api', API);
   const BASE = `http://${API}`;
 
-  let userId = localStorage.getItem('ce408_user');
+  let userId = localStorage.getItem('ce-408_user');
   if (!userId) {
     userId = 'u' + Math.floor(Math.random() * 100000);
-    localStorage.setItem('ce408_user', userId);
+    localStorage.setItem('ce-408_user', userId);
   }
   document.getElementById('userPill').textContent = `user: ${userId}`;
 
@@ -1273,7 +1273,7 @@ What you get visually:
 ### 7.4 Deploy to S3
 
 ```bash
-BUCKET=ce408-storefront-$ACCOUNT_ID
+BUCKET=ce-408-storefront-$ACCOUNT_ID
 aws s3api create-bucket --bucket $BUCKET --region $AWS_REGION
 
 # Disable Block Public Access on this bucket only
@@ -1295,7 +1295,7 @@ aws s3api put-bucket-policy --bucket $BUCKET --policy file://bucket-policy.json
 aws s3 website s3://$BUCKET/ --index-document index.html
 
 # Substitute the live ALB DNS into the file before upload
-ALB_DNS=$(aws elbv2 describe-load-balancers --names ce408-alb \
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].DNSName" --output text)
 sed "s/__ALB_DNS__/$ALB_DNS/g" storefront/index.html > storefront/index.deploy.html
 
@@ -1309,7 +1309,7 @@ echo "Storefront live at: http://$BUCKET.s3-website-$AWS_REGION.amazonaws.com"
 That URL is your **live, shareable storefront**, in this format:
 
 ```
-http://ce408-storefront-123456789012.s3-website-us-east-1.amazonaws.com
+http://ce-408-storefront-123456789012.s3-website-us-east-1.amazonaws.com
 ```
 
 ### 7.5 Verify
@@ -1344,39 +1344,39 @@ cat > dashboard.json <<'EOF'
   "widgets": [
     {"type":"metric","x":0,"y":0,"width":12,"height":6,
       "properties":{"title":"ECS CPU per service","region":"us-east-1","metrics":[
-        ["AWS/ECS","CPUUtilization","ServiceName","ce408-catalog","ClusterName","ce408-cluster"],
-        ["...","ServiceName","ce408-cart"],
-        ["...","ServiceName","ce408-orders"]],"stat":"Average","period":60}},
+        ["AWS/ECS","CPUUtilization","ServiceName","ce-408-catalog","ClusterName","ce-408-cluster"],
+        ["...","ServiceName","ce-408-cart"],
+        ["...","ServiceName","ce-408-orders"]],"stat":"Average","period":60}},
     {"type":"metric","x":12,"y":0,"width":12,"height":6,
       "properties":{"title":"ALB request count + 5xx","region":"us-east-1","metrics":[
-        ["AWS/ApplicationELB","RequestCount","LoadBalancer","app/ce408-alb/XXXX"],
+        ["AWS/ApplicationELB","RequestCount","LoadBalancer","app/ce-408-alb/XXXX"],
         [".","HTTPCode_Target_5XX_Count",".","."]],"stat":"Sum","period":60}},
     {"type":"metric","x":0,"y":6,"width":12,"height":6,
       "properties":{"title":"Task count per service","region":"us-east-1","metrics":[
-        ["ECS/ContainerInsights","RunningTaskCount","ServiceName","ce408-catalog","ClusterName","ce408-cluster"],
-        ["...","ServiceName","ce408-cart"],
-        ["...","ServiceName","ce408-orders"]],"stat":"Average","period":60}},
+        ["ECS/ContainerInsights","RunningTaskCount","ServiceName","ce-408-catalog","ClusterName","ce-408-cluster"],
+        ["...","ServiceName","ce-408-cart"],
+        ["...","ServiceName","ce-408-orders"]],"stat":"Average","period":60}},
     {"type":"metric","x":12,"y":6,"width":12,"height":6,
       "properties":{"title":"RDS CPU & SQS depth","region":"us-east-1","metrics":[
-        ["AWS/RDS","CPUUtilization","DBInstanceIdentifier","ce408-postgres"],
-        ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","ce408-orders-fulfilment"]],"stat":"Average","period":60}}
+        ["AWS/RDS","CPUUtilization","DBInstanceIdentifier","ce-408-postgres"],
+        ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","ce-408-orders-fulfilment"]],"stat":"Average","period":60}}
   ]
 }
 EOF
 
 # Replace the LB suffix in the JSON (CloudWatch needs the app/<name>/<id> form):
-LB_SUFFIX=$(aws elbv2 describe-load-balancers --names ce408-alb \
+LB_SUFFIX=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].LoadBalancerArn" --output text | awk -F'loadbalancer/' '{print $2}')
-sed -i "s|app/ce408-alb/XXXX|$LB_SUFFIX|g" dashboard.json
+sed -i "s|app/ce-408-alb/XXXX|$LB_SUFFIX|g" dashboard.json
 
-aws cloudwatch put-dashboard --dashboard-name ce408 \
+aws cloudwatch put-dashboard --dashboard-name ce-408 \
   --dashboard-body file://dashboard.json
 ```
 
 ### 7.2 Alarms
 
 ```bash
-aws cloudwatch put-metric-alarm --alarm-name ce408-alb-5xx-high \
+aws cloudwatch put-metric-alarm --alarm-name ce-408-alb-5xx-high \
   --metric-name HTTPCode_Target_5XX_Count --namespace AWS/ApplicationELB \
   --statistic Sum --period 60 --threshold 10 --comparison-operator GreaterThanThreshold \
   --evaluation-periods 2 \
@@ -1393,13 +1393,13 @@ aws cloudwatch put-metric-alarm --alarm-name ce408-alb-5xx-high \
 
 ```bash
 # Key pair
-aws ec2 create-key-pair --key-name ce408-k6 \
-  --query "KeyMaterial" --output text > ce408-k6.pem
-chmod 400 ce408-k6.pem
+aws ec2 create-key-pair --key-name ce-408-k6 \
+  --query "KeyMaterial" --output text > ce-408-k6.pem
+chmod 400 ce-408-k6.pem
 
 # SG: allow SSH from your IP
 MY_IP=$(curl -s ifconfig.me)
-K6_SG=$(aws ec2 create-security-group --group-name ce408-k6-sg \
+K6_SG=$(aws ec2 create-security-group --group-name ce-408-k6-sg \
   --description "k6 generator" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $K6_SG \
   --protocol tcp --port 22 --cidr $MY_IP/32
@@ -1410,18 +1410,18 @@ AMI=$(aws ec2 describe-images --owners amazon \
   --query "sort_by(Images,&CreationDate)[-1].ImageId" --output text)
 
 aws ec2 run-instances --image-id $AMI --instance-type t3.micro \
-  --key-name ce408-k6 --security-group-ids $K6_SG \
+  --key-name ce-408-k6 --security-group-ids $K6_SG \
   --subnet-id $PUB_SUBNET_1 --associate-public-ip-address \
-  --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=$PROJECT},{Key=Name,Value=ce408-k6}]"
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=$PROJECT},{Key=Name,Value=ce-408-k6}]"
 ```
 
 Get the public IP:
 
 ```bash
 K6_PUBLIC_IP=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=ce408-k6" "Name=instance-state-name,Values=running" \
+  --filters "Name=tag:Name,Values=ce-408-k6" "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-ssh -i ce408-k6.pem ec2-user@$K6_PUBLIC_IP
+ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP
 ```
 
 On the instance:
@@ -1511,9 +1511,9 @@ Save as `chaos/kill-task.sh`:
 #!/usr/bin/env bash
 set -euo pipefail
 SVC=${1:-catalog}
-CLUSTER=ce408-cluster
+CLUSTER=ce-408-cluster
 TASK=$(aws ecs list-tasks --cluster $CLUSTER \
-  --service-name ce408-$SVC \
+  --service-name ce-408-$SVC \
   --query "taskArns[0]" --output text)
 [ "$TASK" = "None" ] && { echo "no running task for $SVC"; exit 1; }
 echo "Killing $TASK"
@@ -1559,7 +1559,7 @@ Rebuild and push the Orders image once with this middleware in place:
 
 ```bash
 ./scripts/build-and-push.sh
-aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
   --force-new-deployment
 ```
 
@@ -1572,12 +1572,12 @@ set -euo pipefail
 DURATION_S=${1:-180}     # default: 3 minutes
 LATENCY_MS=${2:-500}     # default: 500 ms
 
-CLEAN_TD_ARN=$(aws ecs describe-task-definition --task-definition ce408-orders \
+CLEAN_TD_ARN=$(aws ecs describe-task-definition --task-definition ce-408-orders \
   --query "taskDefinition.taskDefinitionArn" --output text)
 echo "Clean task def: $CLEAN_TD_ARN"
 
 # Re-register the same task def with CHAOS_LATENCY_MS injected
-aws ecs describe-task-definition --task-definition ce408-orders \
+aws ecs describe-task-definition --task-definition ce-408-orders \
   --query "taskDefinition" \
   | jq --arg ms "$LATENCY_MS" '
       .containerDefinitions[0].environment += [{"name":"CHAOS_LATENCY_MS","value":$ms}]
@@ -1588,13 +1588,13 @@ CHAOS_TD=$(aws ecs register-task-definition --cli-input-json file:///tmp/orders-
   --query "taskDefinition.taskDefinitionArn" --output text)
 echo "Chaos task def: $CHAOS_TD"
 
-aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
   --task-definition $CHAOS_TD --force-new-deployment
 echo "${LATENCY_MS}ms latency injected on Orders. Holding for ${DURATION_S}s..."
 sleep $DURATION_S
 
 echo "Rolling back to clean task def..."
-aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
   --task-definition $CLEAN_TD_ARN --force-new-deployment
 echo "Rolled back. Latency should return to baseline within ~60s."
 ```
@@ -1685,15 +1685,15 @@ Best when you'll be back tomorrow. Costs ~$50/month while paused (ALB + NAT keep
 ```bash
 # 1. Scale all Fargate services to 0 — Fargate billing stops
 for svc in catalog cart orders; do
-  aws ecs update-service --cluster ce408-cluster --service ce408-$svc --desired-count 0
+  aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc --desired-count 0
 done
 
 # 2. Stop the RDS instance — billing stops, max 7 days then auto-restarts
-aws rds stop-db-instance --db-instance-identifier ce408-postgres
+aws rds stop-db-instance --db-instance-identifier ce-408-postgres
 
 # 3. Stop the k6 EC2
 K6_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=ce408-k6" "Name=instance-state-name,Values=running" \
+  --filters "Name=tag:Name,Values=ce-408-k6" "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" --output text)
 [ -n "$K6_ID" ] && aws ec2 stop-instances --instance-ids $K6_ID
 ```
@@ -1707,19 +1707,19 @@ Best when the viva is weeks out. Costs **under $1/month**. Resume takes ~30 minu
 ```bash
 # === 1. Snapshot RDS, then delete the instance ===
 aws rds create-db-snapshot \
-  --db-snapshot-identifier ce408-postgres-pause \
-  --db-instance-identifier ce408-postgres
-aws rds wait db-snapshot-available --db-snapshot-identifier ce408-postgres-pause
-aws rds delete-db-instance --db-instance-identifier ce408-postgres \
+  --db-snapshot-identifier ce-408-postgres-pause \
+  --db-instance-identifier ce-408-postgres
+aws rds wait db-snapshot-available --db-snapshot-identifier ce-408-postgres-pause
+aws rds delete-db-instance --db-instance-identifier ce-408-postgres \
   --skip-final-snapshot --delete-automated-backups
 
 # === 2. Scale Fargate to 0 (you can also delete services — task defs persist for free) ===
 for svc in catalog cart orders; do
-  aws ecs update-service --cluster ce408-cluster --service ce408-$svc --desired-count 0
+  aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc --desired-count 0
 done
 
 # === 3. Delete the ALB (target groups stay — they're free) ===
-ALB_ARN=$(aws elbv2 describe-load-balancers --names ce408-alb \
+ALB_ARN=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].LoadBalancerArn" --output text)
 aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
 
@@ -1736,12 +1736,12 @@ aws ec2 release-address --allocation-id $EIP_ALLOC
 
 # === 5. Stop (or terminate) the k6 EC2 ===
 K6_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=ce408-k6" "Name=instance-state-name,Values=running" \
+  --filters "Name=tag:Name,Values=ce-408-k6" "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" --output text)
 [ -n "$K6_ID" ] && aws ec2 stop-instances --instance-ids $K6_ID
 
 # === 6. Delete the dashboard (saves $3/month) ===
-aws cloudwatch delete-dashboards --dashboard-names ce408
+aws cloudwatch delete-dashboards --dashboard-names ce-408
 # (You'll re-create it on resume from the dashboard.json file you saved.)
 
 # === 7. Sanity check — what's left billable? ===
@@ -1809,18 +1809,18 @@ aws ec2 create-route --route-table-id $PRIV_RTB \
 
 # === 2. Restore RDS from snapshot ===
 aws rds restore-db-instance-from-db-snapshot \
-  --db-instance-identifier ce408-postgres \
-  --db-snapshot-identifier ce408-postgres-pause \
+  --db-instance-identifier ce-408-postgres \
+  --db-snapshot-identifier ce-408-postgres-pause \
   --db-instance-class db.t4g.micro \
-  --db-subnet-group-name ce408-db-subnets \
+  --db-subnet-group-name ce-408-db-subnets \
   --vpc-security-group-ids $RDS_SG \
   --no-publicly-accessible
-aws rds wait db-instance-available --db-instance-identifier ce408-postgres
-RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce408-postgres \
+aws rds wait db-instance-available --db-instance-identifier ce-408-postgres
+RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-postgres \
   --query "DBInstances[0].Endpoint.Address" --output text)
 
 # Endpoint may have changed — update SSM and any task defs that hardcoded it
-aws ssm put-parameter --name /ce408/rds/endpoint --type String \
+aws ssm put-parameter --name /ce-408/rds/endpoint --type String \
   --value "$RDS_ENDPOINT" --overwrite
 # Re-register task defs with the new endpoint:
 sed -i "s/RDS_ENDPOINT_HERE/$RDS_ENDPOINT/g" catalog-taskdef.json orders-taskdef.json
@@ -1828,14 +1828,14 @@ aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
 aws ecs register-task-definition --cli-input-json file://orders-taskdef.json
 
 # === 3. Recreate ALB and listener rules ===
-ALB_ARN=$(aws elbv2 create-load-balancer --name ce408-alb --type application \
+ALB_ARN=$(aws elbv2 create-load-balancer --name ce-408-alb --type application \
   --scheme internet-facing --subnets $PUB_SUBNET_1 $PUB_SUBNET_2 \
   --security-groups $ALB_SG --tags Key=Project,Value=$PROJECT \
   --query "LoadBalancers[0].LoadBalancerArn" --output text)
 
-CATALOG_TG=$(aws elbv2 describe-target-groups --names ce408-catalog-tg --query "TargetGroups[0].TargetGroupArn" --output text)
-CART_TG=$(aws elbv2 describe-target-groups   --names ce408-cart-tg    --query "TargetGroups[0].TargetGroupArn" --output text)
-ORDERS_TG=$(aws elbv2 describe-target-groups --names ce408-orders-tg  --query "TargetGroups[0].TargetGroupArn" --output text)
+CATALOG_TG=$(aws elbv2 describe-target-groups --names ce-408-catalog-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+CART_TG=$(aws elbv2 describe-target-groups   --names ce-408-cart-tg    --query "TargetGroups[0].TargetGroupArn" --output text)
+ORDERS_TG=$(aws elbv2 describe-target-groups --names ce-408-orders-tg  --query "TargetGroups[0].TargetGroupArn" --output text)
 
 LISTENER_ARN=$(aws elbv2 create-listener --load-balancer-arn $ALB_ARN \
   --protocol HTTP --port 80 \
@@ -1854,27 +1854,27 @@ aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 30 \
 # Reattach services to the new target groups (services keep their TG link
 # only if you didn't delete the service — if you did, recreate per §6.4)
 for svc in catalog cart orders; do
-  aws ecs update-service --cluster ce408-cluster --service ce408-$svc --desired-count 1
+  aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc --desired-count 1
 done
-aws ecs wait services-stable --cluster ce408-cluster \
-  --services ce408-catalog ce408-cart ce408-orders
+aws ecs wait services-stable --cluster ce-408-cluster \
+  --services ce-408-catalog ce-408-cart ce-408-orders
 
 # === 4. Recreate the dashboard ===
 LB_SUFFIX=$(echo $ALB_ARN | awk -F'loadbalancer/' '{print $2}')
-sed -i "s|app/ce408-alb/[A-Za-z0-9]*|$LB_SUFFIX|g" dashboard.json
-aws cloudwatch put-dashboard --dashboard-name ce408 --dashboard-body file://dashboard.json
+sed -i "s|app/ce-408-alb/[A-Za-z0-9]*|$LB_SUFFIX|g" dashboard.json
+aws cloudwatch put-dashboard --dashboard-name ce-408 --dashboard-body file://dashboard.json
 
 # === 5. Start the k6 EC2 ===
 K6_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=ce408-k6" "Name=instance-state-name,Values=stopped" \
+  --filters "Name=tag:Name,Values=ce-408-k6" "Name=instance-state-name,Values=stopped" \
   --query "Reservations[0].Instances[0].InstanceId" --output text)
 aws ec2 start-instances --instance-ids $K6_ID
 aws ec2 wait instance-running --instance-ids $K6_ID
 
 # === 6. Re-deploy the storefront with the new ALB DNS ===
-ALB_DNS=$(aws elbv2 describe-load-balancers --names ce408-alb \
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].DNSName" --output text)
-BUCKET=ce408-storefront-$ACCOUNT_ID
+BUCKET=ce-408-storefront-$ACCOUNT_ID
 sed "s/__ALB_DNS__/$ALB_DNS/g" storefront/index.html > storefront/index.deploy.html
 aws s3 cp storefront/index.deploy.html s3://$BUCKET/index.html \
   --content-type "text/html" --cache-control "no-cache"
@@ -1902,40 +1902,40 @@ Order matters — delete dependents before parents.
 ```bash
 # Delete ECS services
 for svc in catalog cart orders; do
-  aws ecs update-service --cluster ce408-cluster --service ce408-$svc --desired-count 0
-  aws ecs delete-service --cluster ce408-cluster --service ce408-$svc --force
+  aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc --desired-count 0
+  aws ecs delete-service --cluster ce-408-cluster --service ce-408-$svc --force
 done
-aws ecs delete-cluster --cluster ce408-cluster
+aws ecs delete-cluster --cluster ce-408-cluster
 
 # Delete ALB, listener, target groups
-ALB_ARN=$(aws elbv2 describe-load-balancers --names ce408-alb --query "LoadBalancers[0].LoadBalancerArn" --output text 2>/dev/null || true)
+ALB_ARN=$(aws elbv2 describe-load-balancers --names ce-408-alb --query "LoadBalancers[0].LoadBalancerArn" --output text 2>/dev/null || true)
 [ -n "$ALB_ARN" ] && aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
 for svc in catalog cart orders; do
-  TG=$(aws elbv2 describe-target-groups --names ce408-$svc-tg --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || true)
+  TG=$(aws elbv2 describe-target-groups --names ce-408-$svc-tg --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || true)
   [ -n "$TG" ] && aws elbv2 delete-target-group --target-group-arn $TG
 done
 
 # Delete RDS (no final snapshot = $0 going forward) and any saved snapshots
-aws rds delete-db-instance --db-instance-identifier ce408-postgres --skip-final-snapshot 2>/dev/null || true
-aws rds delete-db-snapshot --db-snapshot-identifier ce408-postgres-pause 2>/dev/null || true
-aws rds delete-db-subnet-group --db-subnet-group-name ce408-db-subnets
+aws rds delete-db-instance --db-instance-identifier ce-408-postgres --skip-final-snapshot 2>/dev/null || true
+aws rds delete-db-snapshot --db-snapshot-identifier ce-408-postgres-pause 2>/dev/null || true
+aws rds delete-db-subnet-group --db-subnet-group-name ce-408-db-subnets
 
 # DynamoDB, SQS
-aws dynamodb delete-table --table-name ce408-cart-sessions
-aws sqs delete-queue --queue-url $(aws sqs get-queue-url --queue-name ce408-orders-fulfilment --query QueueUrl --output text)
+aws dynamodb delete-table --table-name ce-408-cart-sessions
+aws sqs delete-queue --queue-url $(aws sqs get-queue-url --queue-name ce-408-orders-fulfilment --query QueueUrl --output text)
 
 # ECR (deletes images too)
-for r in catalog cart orders; do aws ecr delete-repository --repository-name ce408/$r --force; done
+for r in catalog cart orders; do aws ecr delete-repository --repository-name ce-408/$r --force; done
 
 # S3 storefront bucket (empty first, then delete)
-BUCKET=ce408-storefront-$ACCOUNT_ID
+BUCKET=ce-408-storefront-$ACCOUNT_ID
 aws s3 rm s3://$BUCKET --recursive 2>/dev/null || true
 aws s3api delete-bucket --bucket $BUCKET 2>/dev/null || true
 
 # EC2 + key pair + SG
-K6_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=ce408-k6" --query "Reservations[].Instances[].InstanceId" --output text)
+K6_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=ce-408-k6" --query "Reservations[].Instances[].InstanceId" --output text)
 [ -n "$K6_ID" ] && aws ec2 terminate-instances --instance-ids $K6_ID
-aws ec2 delete-key-pair --key-name ce408-k6
+aws ec2 delete-key-pair --key-name ce-408-k6
 
 # NAT GW + EIP (if still around)
 NAT_ID=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" --query "NatGateways[0].NatGatewayId" --output text 2>/dev/null || true)
@@ -1945,14 +1945,14 @@ if [ "$NAT_ID" != "None" ] && [ -n "$NAT_ID" ]; then
 fi
 
 # CloudWatch
-aws cloudwatch delete-dashboards --dashboard-names ce408 2>/dev/null || true
-aws cloudwatch delete-alarms --alarm-names ce408-alb-5xx-high 2>/dev/null || true
-aws logs delete-log-group --log-group-name /ecs/ce408 2>/dev/null || true
+aws cloudwatch delete-dashboards --dashboard-names ce-408 2>/dev/null || true
+aws cloudwatch delete-alarms --alarm-names ce-408-alb-5xx-high 2>/dev/null || true
+aws logs delete-log-group --log-group-name /ecs/ce-408 2>/dev/null || true
 
 # (No FIS templates to delete — chaos was scripted.)
 
 # IAM roles
-for r in ce408-ecs-exec ce408-task-role; do
+for r in ce-408-ecs-exec ce-408-task-role; do
   for p in $(aws iam list-attached-role-policies --role-name $r --query "AttachedPolicies[].PolicyArn" --output text); do
     aws iam detach-role-policy --role-name $r --policy-arn $p
   done
@@ -1963,11 +1963,11 @@ for r in ce408-ecs-exec ce408-task-role; do
 done
 
 # SSM parameters
-for p in /ce408/rds/password /ce408/rds/endpoint /ce408/sqs/orders-url /ce408/dynamodb/cart-table; do
+for p in /ce-408/rds/password /ce-408/rds/endpoint /ce-408/sqs/orders-url /ce-408/dynamodb/cart-table; do
   aws ssm delete-parameter --name $p
 done
 
-# Finally — VPC (use console: VPC → ce408-vpc → Delete VPC; it cascades subnets/IGW/RTBs/SGs)
+# Finally — VPC (use console: VPC → ce-408-vpc → Delete VPC; it cascades subnets/IGW/RTBs/SGs)
 ```
 
 Verify nothing remains:
@@ -1988,7 +1988,7 @@ Should return an empty array. Also check **AWS Cost Explorer** 24 h later for an
 | ECS task stops with `CannotPullContainerError` | Same as above — can't reach ECR | Confirm NAT works, or add VPC endpoints for ECR + S3 |
 | ALB target unhealthy | SG mismatch, wrong port, wrong health-check path | Verify `SVC_SG` allows 8000 from `ALB_SG`; health check path = `/healthz` |
 | RDS `Connection refused` | RDS SG doesn't allow 5432 from service SG | `authorize-security-group-ingress` chain |
-| `chaos/kill-task.sh` says "no running task" | Service is scaled to 0 or still provisioning | `aws ecs describe-services --cluster ce408-cluster --services ce408-catalog` — confirm `desiredCount` and `runningCount` ≥ 1 |
+| `chaos/kill-task.sh` says "no running task" | Service is scaled to 0 or still provisioning | `aws ecs describe-services --cluster ce-408-cluster --services ce-408-catalog` — confirm `desiredCount` and `runningCount` ≥ 1 |
 | `chaos/latency.sh` finishes but latency never rose | Middleware not deployed; CHAOS_LATENCY_MS is being read at import-time but the new task def isn't running yet | Check `aws ecs describe-services` — wait for the new task def revision to be `runningCount` then re-test; verify the env var is on the new task with `aws ecs describe-tasks` |
 | RDS endpoint changed after restore-from-snapshot and services keep crashing | Old endpoint baked into task definition | Re-register task def with new `DB_HOST` env, then `update-service --force-new-deployment` |
 | Stuck deletion of VPC | Some ENI / SG dependency lingering | `aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=$VPC_ID` to find the holdout |
@@ -2002,7 +2002,7 @@ Save this file alongside the README and `source vars.sh` at the start of every s
 
 ```bash
 export AWS_REGION=us-east-1
-export PROJECT=ce408
+export PROJECT=ce-408
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export TAG="Key=Project,Value=$PROJECT"
 
