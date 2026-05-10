@@ -267,39 +267,34 @@ You should see one VPC, three ECR repos, and two IAM roles.
 ### 4.1 RDS PostgreSQL
 
 ```bash
-# DB subnet group across the 2 private subnets
-aws rds create-db-subnet-group \
-  --db-subnet-group-name ce-408-db-subnets \
-  --db-subnet-group-description "ce-408 RDS subnets" \
-  --subnet-ids $PRIV_SUBNET_1 $PRIV_SUBNET_2 \
-  --tags Key=Project,Value=$PROJECT
-
-# Generate and store a strong password
+# Generate and store a strong password — save the output in Notepad!
 DB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-aws ssm put-parameter --name /ce-408/rds/password --type SecureString \
-  --value "$DB_PASSWORD" --overwrite
+echo $DB_PASSWORD
+```
 
+```bash
+# DB subnet group across the 2 private subnets
+aws rds create-db-subnet-group --db-subnet-group-name ce-408-db-subnets --db-subnet-group-description "ce-408 RDS subnets" --subnet-ids $PRIV_SUBNET_1 $PRIV_SUBNET_2 --tags Key=Project,Value=$PROJECT
+```
+
+```bash
+# Store password in SSM (MSYS_NO_PATHCONV=1 prevents Git Bash path mangling)
+MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/rds/password" --type SecureString --value "$DB_PASSWORD" --overwrite
+```
+
+```bash
 # Create the instance — single AZ, no multi-AZ, smallest burstable
-aws rds create-db-instance \
-  --db-instance-identifier ce-408-postgres \
-  --db-instance-class db.t4g.micro \
-  --engine postgres --engine-version 16.3 \
-  --master-username ce408admin \
-  --master-user-password "$DB_PASSWORD" \
-  --allocated-storage 20 --storage-type gp3 \
-  --vpc-security-group-ids $RDS_SG \
-  --db-subnet-group-name ce-408-db-subnets \
-  --no-publicly-accessible \
-  --backup-retention-period 1 \
-  --tags Key=Project,Value=$PROJECT
+aws rds create-db-instance --db-instance-identifier ce-408-postgres --db-instance-class db.t4g.micro --engine postgres --engine-version 16.3 --master-username ce408admin --master-user-password "$DB_PASSWORD" --allocated-storage 20 --storage-type gp3 --vpc-security-group-ids $RDS_SG --db-subnet-group-name ce-408-db-subnets --no-publicly-accessible --backup-retention-period 1 --tags Key=Project,Value=$PROJECT
 ```
 
 Wait ~10–15 min for status `available`:
 
 ```bash
 aws rds wait db-instance-available --db-instance-identifier ce-408-postgres
-RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-postgres \
-  --query "DBInstances[0].Endpoint.Address" --output text)
+```
+
+```bash
+RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-postgres --query "DBInstances[0].Endpoint.Address" --output text)
 echo $RDS_ENDPOINT
 ```
 
