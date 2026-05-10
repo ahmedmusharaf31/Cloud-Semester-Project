@@ -393,7 +393,6 @@ Create one local repo with all three services:
 ce-408-services/
 ├── catalog/
 │   ├── app/main.py
-│   ├── app/db.py
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── cart/        (same shape — DynamoDB instead of SQL)
