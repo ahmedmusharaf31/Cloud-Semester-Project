@@ -345,8 +345,7 @@ CREATE TABLE order_items (
 Run after k6 EC2 is up (§9):
 
 ```bash
-ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP \
-  "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce-408admin -f -" < bootstrap.sql
+ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce408admin -f -" < bootstrap.sql
 ```
 
 ### 4.3 DynamoDB
