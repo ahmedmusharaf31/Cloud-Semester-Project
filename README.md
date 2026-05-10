@@ -396,7 +396,7 @@ ce-408-services/
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── cart/        (same shape — DynamoDB instead of SQL)
-├── orders/      (same shape — SQL + SQS publish)
+├── orders/      (same shape — SQL + SQS publish + chaos latency middleware)
 └── scripts/build-and-push.sh
 ```
 
@@ -485,6 +485,7 @@ done
 Run it:
 
 ```bash
+cd ce-408-services
 chmod +x scripts/build-and-push.sh
 ./scripts/build-and-push.sh
 ```
@@ -701,7 +702,7 @@ app.add_middleware(
 Rebuild and force a new deployment so the running tasks pick up the change:
 
 ```bash
-./scripts/build-and-push.sh
+cd ce-408-services && ./scripts/build-and-push.sh
 for svc in catalog cart orders; do
   aws ecs update-service --cluster ce-408-cluster --service ce-408-$svc \
     --force-new-deployment
@@ -1551,7 +1552,7 @@ async def inject_chaos_latency(request, call_next):
 Rebuild and push the Orders image once with this middleware in place:
 
 ```bash
-./scripts/build-and-push.sh
+cd ce-408-services && ./scripts/build-and-push.sh
 aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
   --force-new-deployment
 ```
