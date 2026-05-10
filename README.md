@@ -657,14 +657,21 @@ done
 ### 6.6 Smoke test the live stack
 
 ```bash
-ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
-  --query "LoadBalancers[0].DNSName" --output text)
+ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb --query "LoadBalancers[0].DNSName" --output text)
+```
 
+```bash
 curl http://$ALB_DNS/catalog/products
 curl http://$ALB_DNS/cart/sessions/u1
-curl -X POST http://$ALB_DNS/orders \
-  -H 'content-type: application/json' \
-  -d '{"userId":"u1","items":[{"sku":"SKU-001","qty":1}]}'
+curl -X POST "http://$ALB_DNS/orders?user_id=u1" -H "content-type: application/json" -d '[{"sku":"SKU-001","qty":1,"price_cents":2499}]'
+```
+
+Note: hitting the ALB root URL (`/`) returns "not found" — that is expected. The ALB only routes `/catalog/*`, `/cart/*`, and `/orders/*`. The UI is served from S3 (§7).
+
+Also add a listener rule for the exact `/orders` path (required because the ALB pattern `/orders/*` won't match a POST to `/orders`):
+
+```bash
+MSYS_NO_PATHCONV=1 aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 31 --conditions Field=path-pattern,Values='/orders' --actions Type=forward,TargetGroupArn=$ORDERS_TG
 ```
 
 End of Phase 1 (proposal day 4). Happy path works.
@@ -1419,12 +1426,23 @@ On the instance:
 
 ```bash
 sudo dnf install -y postgresql15
-sudo rpm --import https://dl.k6.io/key.gpg
-sudo curl -L https://dl.k6.io/rpm/repo.rpm -o /etc/yum.repos.d/k6.repo
-sudo dnf install -y k6
+curl -L https://github.com/grafana/k6/releases/download/v0.52.0/k6-v0.52.0-linux-amd64.tar.gz | tar xz
+sudo mv k6-v0.52.0-linux-amd64/k6 /usr/local/bin/
+k6 version
 ```
 
-(Now is the time to also run the `bootstrap.sql` from §4.2 from this box.)
+Before running bootstrap.sql, allow the k6 SG to reach RDS (the RDS SG only allows Fargate by default):
+
+```bash
+K6_SG=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=ce-408-k6-sg" --query "SecurityGroups[0].GroupId" --output text)
+aws ec2 authorize-security-group-ingress --group-id $RDS_SG --protocol tcp --port 5432 --source-group $K6_SG
+```
+
+Then run bootstrap.sql from your local Git Bash:
+
+```bash
+ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce408admin -d postgres -f -" < bootstrap.sql
+```
 
 ### 8.2 k6 scripts
 
