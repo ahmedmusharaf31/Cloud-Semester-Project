@@ -56,10 +56,9 @@ If your viva is more than a week away, **use Strategy B**. The 30-minute resume 
    - This is your safety net — if you miss a pause step, you get an email
      before the bill is large.
 3. Pick a region and stick with it for the whole project. **Recommended:
-   `us-east-1`** (cheapest, all services available, FIS fully supported).
-4. Request quota for AWS Fault Injection Service if first use:
-   AWS Console → FIS → Experiment templates → if you can land here without
-   error, you're good. If not, open a quota / activation ticket on day 1.
+   `us-east-1`** (cheapest, all services available).
+4. (Skipped — we use scripted chaos instead of AWS FIS, so no quota request
+   is needed. See §10 for the rationale.)
 
 ### 1.2 Local tools
 
@@ -112,7 +111,7 @@ export TAG="Key=Project,Value=$PROJECT"
                                                                             SQS
                                                                   (orders-fulfilment)
 
-   AWS FIS ── injects ──► task termination, network latency
+   Chaos scripts ── inject ──► task termination, network latency (env-var rollout)
    CloudWatch ── collects ──► metrics, logs, alarms, dashboard
 ```
 
@@ -238,7 +237,7 @@ EOF
 aws iam put-role-policy --role-name ce408-task-role \
   --policy-name ce408-task-inline --policy-document file://task-policy.json
 
-# FIS service role — created in Phase 8
+# (No FIS role — chaos is scripted via direct ECS API calls; see Phase 8)
 ```
 
 ### 3.4 ECR repositories
@@ -1494,110 +1493,146 @@ scale out from 1 → 2+ tasks during the spike.
 
 ---
 
-## 10. Phase 8 — Chaos Experiments (AWS FIS)
+## 10. Phase 8 — Chaos Experiments (Scripted)
 
-### 9.1 FIS service role
+We use a **scripted chaos harness** rather than AWS Fault Injection Service
+(FIS). Reason: FIS requires a paid AWS account tier and was blocking
+day-one progress. The scripted approach uses direct ECS API calls and a
+small middleware in the Orders service — total of ~50 lines of bash and ~10
+lines of Python — and produces the same dashboard signatures as the
+equivalent FIS experiments. A future migration path to FIS is preserved in
+proposal §6 (Future Work).
 
-```bash
-cat > fis-trust.json <<'EOF'
-{ "Version":"2012-10-17","Statement":[{"Effect":"Allow",
-  "Principal":{"Service":"fis.amazonaws.com"},"Action":"sts:AssumeRole"}] }
-EOF
-aws iam create-role --role-name ce408-fis-role \
-  --assume-role-policy-document file://fis-trust.json
-aws iam attach-role-policy --role-name ce408-fis-role \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorECSAccess
-aws iam attach-role-policy --role-name ce408-fis-role \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorNetworkAccess
-```
+### 10.1 Experiment 1 — Task termination
 
-### 9.2 Experiment template — Task termination
-
-`fis-task-kill.json`:
-
-```json
-{
-  "description": "Terminate one Catalog Fargate task",
-  "roleArn": "arn:aws:iam::ACCOUNT_ID:role/ce408-fis-role",
-  "stopConditions": [{"source": "none"}],
-  "targets": {
-    "OneCatalogTask": {
-      "resourceType": "aws:ecs:task",
-      "resourceTags": {"Project": "ce408"},
-      "filters": [
-        {"path":"ClusterArn","values":["arn:aws:ecs:us-east-1:ACCOUNT_ID:cluster/ce408-cluster"]},
-        {"path":"Group","values":["service:ce408-catalog"]}
-      ],
-      "selectionMode": "COUNT(1)"
-    }
-  },
-  "actions": {
-    "Stop": {
-      "actionId": "aws:ecs:stop-task",
-      "targets": {"Tasks": "OneCatalogTask"}
-    }
-  },
-  "tags": {"Project":"ce408"}
-}
-```
-
-Register:
+Save as `chaos/kill-task.sh`:
 
 ```bash
-sed -i "s/ACCOUNT_ID/$ACCOUNT_ID/g" fis-task-kill.json
-aws fis create-experiment-template --cli-input-json file://fis-task-kill.json
+#!/usr/bin/env bash
+set -euo pipefail
+SVC=${1:-catalog}
+CLUSTER=ce408-cluster
+TASK=$(aws ecs list-tasks --cluster $CLUSTER \
+  --service-name ce408-$SVC \
+  --query "taskArns[0]" --output text)
+[ "$TASK" = "None" ] && { echo "no running task for $SVC"; exit 1; }
+echo "Killing $TASK"
+aws ecs stop-task --cluster $CLUSTER --task "$TASK" \
+  --reason "chaos: scripted task termination"
+echo "Stopped. Watch the dashboard — ALB target should mark unhealthy within ~30s,"
+echo "and auto-scaling should restore baseline within ~90s."
+```
+
+Run it:
+
+```bash
+chmod +x chaos/kill-task.sh
+./chaos/kill-task.sh catalog        # kill one Catalog task
+./chaos/kill-task.sh orders         # or kill an Orders task
 ```
 
 **Hypothesis**: ALB removes the dead target within 30 s; auto-scaling brings
-the count back to baseline within 90 s; user-visible 5xx rate stays
-< 1 % during the event.
+the count back to baseline within 90 s; user-visible 5xx rate stays < 1 %
+during the event because there's still a healthy task to serve traffic.
 
-### 9.3 Experiment template — Network latency injection
+**Steady-state metric (capture for the resilience report)**: ALB
+`HTTPCode_Target_5XX_Count` and `HealthyHostCount` per target group.
 
-`fis-latency.json` (uses SSM Run Command on Fargate is not possible — for
-Fargate, the FIS network-latency action targets task ENIs):
+### 10.2 Experiment 2 — Network latency injection
 
-```json
-{
-  "description": "Add 500ms latency to Orders for 3 minutes",
-  "roleArn": "arn:aws:iam::ACCOUNT_ID:role/ce408-fis-role",
-  "stopConditions": [{"source": "none"}],
-  "targets": {
-    "OrdersTasks": {
-      "resourceType": "aws:ecs:task",
-      "resourceTags": {"Project":"ce408"},
-      "filters": [{"path":"Group","values":["service:ce408-orders"]}],
-      "selectionMode": "ALL"
-    }
-  },
-  "actions": {
-    "Latency": {
-      "actionId": "aws:ecs:task-network-latency",
-      "parameters": {
-        "duration": "PT3M",
-        "delayMilliseconds": "500",
-        "jitterMilliseconds": "50"
-      },
-      "targets": {"Tasks": "OrdersTasks"}
-    }
-  },
-  "tags": {"Project":"ce408"}
-}
+Latency is injected by setting an env var on the Orders service that
+activates a tiny middleware. First, add the middleware once (in
+`orders/app/main.py`, near the top):
+
+```python
+import os, asyncio
+CHAOS_LATENCY_MS = int(os.environ.get("CHAOS_LATENCY_MS", "0"))
+
+@app.middleware("http")
+async def inject_chaos_latency(request, call_next):
+    if CHAOS_LATENCY_MS:
+        await asyncio.sleep(CHAOS_LATENCY_MS / 1000)
+    return await call_next(request)
+```
+
+Rebuild and push the Orders image once with this middleware in place:
+
+```bash
+./scripts/build-and-push.sh
+aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+  --force-new-deployment
+```
+
+Now the chaos script flips the env var on, waits, and rolls back. Save as
+`chaos/latency.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+DURATION_S=${1:-180}     # default: 3 minutes
+LATENCY_MS=${2:-500}     # default: 500 ms
+
+CLEAN_TD_ARN=$(aws ecs describe-task-definition --task-definition ce408-orders \
+  --query "taskDefinition.taskDefinitionArn" --output text)
+echo "Clean task def: $CLEAN_TD_ARN"
+
+# Re-register the same task def with CHAOS_LATENCY_MS injected
+aws ecs describe-task-definition --task-definition ce408-orders \
+  --query "taskDefinition" \
+  | jq --arg ms "$LATENCY_MS" '
+      .containerDefinitions[0].environment += [{"name":"CHAOS_LATENCY_MS","value":$ms}]
+      | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
+            .compatibilities,.registeredAt,.registeredBy)
+    ' > /tmp/orders-chaos.json
+CHAOS_TD=$(aws ecs register-task-definition --cli-input-json file:///tmp/orders-chaos.json \
+  --query "taskDefinition.taskDefinitionArn" --output text)
+echo "Chaos task def: $CHAOS_TD"
+
+aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+  --task-definition $CHAOS_TD --force-new-deployment
+echo "${LATENCY_MS}ms latency injected on Orders. Holding for ${DURATION_S}s..."
+sleep $DURATION_S
+
+echo "Rolling back to clean task def..."
+aws ecs update-service --cluster ce408-cluster --service ce408-orders \
+  --task-definition $CLEAN_TD_ARN --force-new-deployment
+echo "Rolled back. Latency should return to baseline within ~60s."
+```
+
+Run it:
+
+```bash
+chmod +x chaos/latency.sh
+./chaos/latency.sh                  # default 500ms for 3 min
+./chaos/latency.sh 300 1000         # 1000ms for 5 min
 ```
 
 **Hypothesis**: p95 latency on `/orders` jumps from ~50 ms baseline to
-~550 ms; recovery is immediate when the experiment ends; no cascade into
-Cart or Catalog because they don't call Orders synchronously.
+~550 ms within 30 s of the rollout completing; recovery within 60 s of
+rollback; no cascade into Cart or Catalog because they don't call Orders
+synchronously.
 
-### 9.4 Run an experiment
+**Steady-state metric**: ALB `TargetResponseTime` p95 on the orders target
+group, plus the storefront's checkout round-trip-time displayed in the
+order-success modal.
 
-```bash
-TPL=$(aws fis list-experiment-templates --query "experimentTemplates[?tags.Project=='ce408']|[0].id" --output text)
-aws fis start-experiment --experiment-template-id $TPL
-# Now watch CloudWatch dashboard for ~3 minutes
-```
+### 10.3 Running a chaos session for the resilience report
 
-Capture screenshots / metric exports for the resilience report.
+For each experiment:
+
+1. Start `baseline.js` k6 from the EC2 (60 RPS steady).
+2. Wait 60 s for steady state — confirm dashboard shows 1 task per service,
+   ALB 5xx near zero, p95 latency stable.
+3. Run the chaos script.
+4. Watch the dashboard. Note the time of the first signal (target unhealthy /
+   latency spike) and the time of full recovery.
+5. Stop k6.
+6. Export the relevant CloudWatch metric data — write recovery time and
+   peak error/latency into the resilience report.
+
+The two experiments together exercise the auto-scaling, ALB target health,
+inter-service timeout behaviour, and request-path latency — the four
+properties the resilience report quantifies.
 
 ---
 
@@ -1615,18 +1650,26 @@ Order of operations during the live viva (memorize this):
 4. **T-3: start `spike.js`** on the k6 EC2; narrate auto-scaling kicking in
    (target count climbs 1 → 3, CPU drops back below 60 %). Reload the
    storefront mid-spike to show it stays responsive.
-5. **T-6: run task-termination FIS experiment**; show ALB target marked
+5. **T-6: run `chaos/kill-task.sh catalog`**; show ALB target marked
    unhealthy and a new task replacing it; user-visible 5xx stays low; place
    another order from the storefront to prove it.
-6. **T-9: run latency-injection FIS experiment**; show p95 latency spike on
-   the dashboard; place an order — the round-trip time jumps from ~50 ms to
-   ~550 ms, then recovers when the experiment ends.
+6. **T-9: run `chaos/latency.sh 180 500`**; show p95 latency spike on the
+   dashboard; place an order — the round-trip time in the storefront's
+   success modal jumps from ~50 ms to ~550 ms, then recovers when the
+   script rolls back.
 7. **T-13: walk through the resilience report** (printed handout).
 8. **T-15: Q&A.**
 
 Have **two backup screenshots** of a previously successful run (dashboard +
 storefront) in case AWS misbehaves on the day. A clickable storefront lands
 much harder than a `curl` in front of the examiner.
+
+> **Why scripted, not FIS?** If asked, the honest answer is the right one:
+> "FIS requires a paid AWS account tier, so we implemented the same two
+> experiments via direct ECS API calls. The dashboard signatures are
+> identical to what FIS would produce — task termination triggers ALB
+> target replacement, env-var rollout injects latency on every Orders task.
+> A FIS migration is in Future Work in the proposal."
 
 ---
 
@@ -1655,7 +1698,7 @@ K6_ID=$(aws ec2 describe-instances \
 [ -n "$K6_ID" ] && aws ec2 stop-instances --instance-ids $K6_ID
 ```
 
-That's it. ALB, NAT GW, VPC, IAM, ECR, task definitions, FIS templates, dashboard all stay in place — resume is just the inverse of the above.
+That's it. ALB, NAT GW, VPC, IAM, ECR, task definitions, dashboard all stay in place — resume is just the inverse of the above.
 
 ### 12.B Strategy B — Long pause (> 7 days, RECOMMENDED for waiting until viva)
 
@@ -1711,9 +1754,8 @@ After Strategy B, the only things still in the account are:
 - VPC, subnets, IGW, route tables, security groups (free)
 - IAM roles (free)
 - ECR images (~$0.10/month)
-- ECS task definitions (free)
+- ECS task definitions (free, including the chaos-latency one)
 - Target groups (free)
-- FIS experiment templates (free)
 - DynamoDB table — empty, on-demand → $0
 - SQS queue — empty → $0
 - RDS snapshot (~$0.02/GB-month → ~$0.50)
@@ -1736,7 +1778,7 @@ After Strategy B, the only things still in the account are:
 | 8 | SQS | (leave) | $0 |
 | 9 | ECR images | (leave) | ~$0.10 |
 | 10 | S3 storefront | (leave) | ~$0 |
-| 11 | Task definitions, FIS templates, IAM, VPC | (leave) | $0 |
+| 11 | Task definitions, IAM, VPC | (leave) | $0 |
 
 The S3 storefront stays live throughout the pause, but it'll show "Failed to load products" while the ALB is gone. That's fine — it lights up again the moment you resume in §13 (after a quick re-deploy with the new ALB DNS).
 
@@ -1907,13 +1949,10 @@ aws cloudwatch delete-dashboards --dashboard-names ce408 2>/dev/null || true
 aws cloudwatch delete-alarms --alarm-names ce408-alb-5xx-high 2>/dev/null || true
 aws logs delete-log-group --log-group-name /ecs/ce408 2>/dev/null || true
 
-# FIS templates
-for tpl in $(aws fis list-experiment-templates --query "experimentTemplates[?tags.Project=='ce408'].id" --output text); do
-  aws fis delete-experiment-template --id $tpl
-done
+# (No FIS templates to delete — chaos was scripted.)
 
 # IAM roles
-for r in ce408-ecs-exec ce408-task-role ce408-fis-role; do
+for r in ce408-ecs-exec ce408-task-role; do
   for p in $(aws iam list-attached-role-policies --role-name $r --query "AttachedPolicies[].PolicyArn" --output text); do
     aws iam detach-role-policy --role-name $r --policy-arn $p
   done
@@ -1949,8 +1988,8 @@ Should return an empty array. Also check **AWS Cost Explorer** 24 h later for an
 | ECS task stops with `CannotPullContainerError` | Same as above — can't reach ECR | Confirm NAT works, or add VPC endpoints for ECR + S3 |
 | ALB target unhealthy | SG mismatch, wrong port, wrong health-check path | Verify `SVC_SG` allows 8000 from `ALB_SG`; health check path = `/healthz` |
 | RDS `Connection refused` | RDS SG doesn't allow 5432 from service SG | `authorize-security-group-ingress` chain |
-| `AccessDeniedException` from FIS run | Role missing one of the FIS managed policies | Attach `AWSFaultInjectionSimulatorECSAccess` etc. (§10.1) |
-| FIS task-kill targets nothing | Tag selector empty — services not tagged correctly | Confirm `aws ecs list-tasks --cluster ce408-cluster --service-name ce408-catalog --query 'taskArns'` returns IDs and they have the `Project=ce408` tag (Fargate tasks inherit from service when `propagateTags: SERVICE` is set on `create-service`) |
+| `chaos/kill-task.sh` says "no running task" | Service is scaled to 0 or still provisioning | `aws ecs describe-services --cluster ce408-cluster --services ce408-catalog` — confirm `desiredCount` and `runningCount` ≥ 1 |
+| `chaos/latency.sh` finishes but latency never rose | Middleware not deployed; CHAOS_LATENCY_MS is being read at import-time but the new task def isn't running yet | Check `aws ecs describe-services` — wait for the new task def revision to be `runningCount` then re-test; verify the env var is on the new task with `aws ecs describe-tasks` |
 | RDS endpoint changed after restore-from-snapshot and services keep crashing | Old endpoint baked into task definition | Re-register task def with new `DB_HOST` env, then `update-service --force-new-deployment` |
 | Stuck deletion of VPC | Some ENI / SG dependency lingering | `aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=$VPC_ID` to find the holdout |
 | Cost Explorer shows charges after teardown | NAT GW still up or ALB still up | The two services that bill hourly with no usage. Check for stragglers by ARN tag filter |
@@ -1993,7 +2032,7 @@ export RDS_SG=sg-zzzzzzzz
 - [ ] Wait for `services-stable`
 - [ ] Smoke test all three endpoints
 - [ ] Run baseline k6 for 60 s — confirm dashboard widgets populate
-- [ ] Open the FIS console with the two templates pre-loaded
+- [ ] Have `chaos/kill-task.sh` and `chaos/latency.sh` open in a terminal, pre-tested
 
 **Day after viva:**
 - [ ] Run §14 teardown
