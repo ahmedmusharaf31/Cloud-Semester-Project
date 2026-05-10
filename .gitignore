@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Build intermediates
+storefront/index.deploy.html
+
+# AWS / secrets — never commit
+*.pem
+vars.sh
+bucket-policy.json
+trust-ecs.json
+fis-trust.json
+task-policy.json
+*-taskdef.json
+dashboard.json
+fis-task-kill.json
+fis-latency.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / tooling
+.vscode/
+.idea/
+.claude/
