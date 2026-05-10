@@ -406,9 +406,11 @@ ce-408-services/
 
 ```python
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import os, asyncpg
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 _pool = None
 
 async def get_pool():
@@ -416,7 +418,7 @@ async def get_pool():
     if _pool is None:
         _pool = await asyncpg.create_pool(
             host=os.environ["DB_HOST"], database="catalog",
-            user="ce-408admin", password=os.environ["DB_PASSWORD"],
+            user="ce408admin", password=os.environ["DB_PASSWORD"],
             min_size=1, max_size=4)
     return _pool
 
@@ -438,6 +440,25 @@ async def get_product(sku: str):
         if not r: raise HTTPException(404)
         return dict(r)
 ```
+
+All three services must include `CORSMiddleware` — the S3 storefront makes cross-origin requests to the ALB from the browser.
+
+After rebuilding and pushing a service, force a new ECS deployment and verify CORS headers:
+
+```bash
+REGISTRY=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY
+docker build -t ce-408/catalog:latest ./ce-408-services/catalog
+docker tag ce-408/catalog:latest $REGISTRY/ce-408/catalog:latest
+docker push $REGISTRY/ce-408/catalog:latest
+aws ecs update-service --cluster ce-408-cluster --service ce-408-catalog --force-new-deployment
+```
+
+```bash
+curl -i -H "Origin: http://example.com" http://$ALB_DNS/catalog/products
+```
+
+Response must include `access-control-allow-origin: *`.
 
 Cart and Orders follow the same shape — Cart uses `boto3.resource('dynamodb')`,
 Orders does an INSERT then `boto3.client('sqs').send_message(...)`.
