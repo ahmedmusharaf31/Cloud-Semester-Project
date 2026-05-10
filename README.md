@@ -514,8 +514,8 @@ aws ecs create-cluster --cluster-name ce-408-cluster \
 CloudWatch log group:
 
 ```bash
-aws logs create-log-group --log-group-name /ecs/ce-408
-aws logs put-retention-policy --log-group-name /ecs/ce-408 --retention-in-days 7
+MSYS_NO_PATHCONV=1 aws logs create-log-group --log-group-name "/ecs/ce-408"
+MSYS_NO_PATHCONV=1 aws logs put-retention-policy --log-group-name "/ecs/ce-408" --retention-in-days 7
 ```
 
 ### 6.2 Task definitions
@@ -554,12 +554,12 @@ aws logs put-retention-policy --log-group-name /ecs/ce-408 --retention-in-days 7
 }
 ```
 
-Substitute and register:
+Register all three (real values are already filled in the JSON files):
 
 ```bash
-sed -i "s/ACCOUNT_ID/$ACCOUNT_ID/g; s/RDS_ENDPOINT_HERE/$RDS_ENDPOINT/g" catalog-taskdef.json
 aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
-# repeat for cart-taskdef.json (DynamoDB env, no DB_HOST), orders-taskdef.json
+aws ecs register-task-definition --cli-input-json file://cart-taskdef.json
+aws ecs register-task-definition --cli-input-json file://orders-taskdef.json
 ```
 
 You'll also need to allow the execution role to read SSM:
@@ -572,24 +572,21 @@ aws iam attach-role-policy --role-name ce-408-ecs-exec \
 ### 6.3 Application Load Balancer
 
 ```bash
-ALB_ARN=$(aws elbv2 create-load-balancer \
-  --name ce-408-alb --type application --scheme internet-facing \
-  --subnets $PUB_SUBNET_1 $PUB_SUBNET_2 \
-  --security-groups $ALB_SG \
-  --tags Key=Project,Value=$PROJECT \
-  --query "LoadBalancers[0].LoadBalancerArn" --output text)
+ALB_ARN=$(aws elbv2 create-load-balancer --name ce-408-alb --type application --scheme internet-facing --subnets $PUB_SUBNET_1 $PUB_SUBNET_2 --security-groups $ALB_SG --tags Key=Project,Value=$PROJECT --query "LoadBalancers[0].LoadBalancerArn" --output text)
+echo $ALB_ARN
+```
 
-# Three target groups
-for svc in catalog cart orders; do
-  aws elbv2 create-target-group --name ce-408-$svc-tg \
-    --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip \
-    --health-check-path /healthz --health-check-interval-seconds 15 \
-    --tags Key=Project,Value=$PROJECT
-done
+```bash
+MSYS_NO_PATHCONV=1 aws elbv2 create-target-group --name ce-408-catalog-tg --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip --health-check-path "/healthz" --health-check-interval-seconds 15 --tags Key=Project,Value=$PROJECT
+MSYS_NO_PATHCONV=1 aws elbv2 create-target-group --name ce-408-cart-tg --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip --health-check-path "/healthz" --health-check-interval-seconds 15 --tags Key=Project,Value=$PROJECT
+MSYS_NO_PATHCONV=1 aws elbv2 create-target-group --name ce-408-orders-tg --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip --health-check-path "/healthz" --health-check-interval-seconds 15 --tags Key=Project,Value=$PROJECT
+```
 
+```bash
 CATALOG_TG=$(aws elbv2 describe-target-groups --names ce-408-catalog-tg --query "TargetGroups[0].TargetGroupArn" --output text)
-CART_TG=$(aws elbv2 describe-target-groups   --names ce-408-cart-tg    --query "TargetGroups[0].TargetGroupArn" --output text)
-ORDERS_TG=$(aws elbv2 describe-target-groups --names ce-408-orders-tg  --query "TargetGroups[0].TargetGroupArn" --output text)
+CART_TG=$(aws elbv2 describe-target-groups --names ce-408-cart-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+ORDERS_TG=$(aws elbv2 describe-target-groups --names ce-408-orders-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+echo $CATALOG_TG $CART_TG $ORDERS_TG
 
 # Default listener returns 404; rules route by path
 LISTENER_ARN=$(aws elbv2 create-listener --load-balancer-arn $ALB_ARN \
@@ -1815,8 +1812,7 @@ RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-pos
 
 # Endpoint may have changed — update SSM and any task defs that hardcoded it
 MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/rds/endpoint" --type String --value "$RDS_ENDPOINT" --overwrite
-# Re-register task defs with the new endpoint:
-sed -i "s/RDS_ENDPOINT_HERE/$RDS_ENDPOINT/g" catalog-taskdef.json orders-taskdef.json
+# Re-register task defs (update DB_HOST value in catalog-taskdef.json and orders-taskdef.json if endpoint changed, then):
 aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
 aws ecs register-task-definition --cli-input-json file://orders-taskdef.json
 
