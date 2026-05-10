@@ -376,9 +376,9 @@ Same — pay-per-request, $0 idle.
 ### 4.5 Store endpoints in SSM (so containers can find them)
 
 ```bash
-aws ssm put-parameter --name /ce-408/rds/endpoint --type String --value "$RDS_ENDPOINT" --overwrite
-aws ssm put-parameter --name /ce-408/sqs/orders-url --type String --value "$ORDERS_QUEUE_URL" --overwrite
-aws ssm put-parameter --name /ce-408/dynamodb/cart-table --type String --value "ce-408-cart-sessions" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/rds/endpoint" --type String --value "$RDS_ENDPOINT" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/sqs/orders-url" --type String --value "$ORDERS_QUEUE_URL" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/dynamodb/cart-table" --type String --value "ce-408-cart-sessions" --overwrite
 ```
 
 ---
@@ -1814,8 +1814,7 @@ RDS_ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier ce-408-pos
   --query "DBInstances[0].Endpoint.Address" --output text)
 
 # Endpoint may have changed — update SSM and any task defs that hardcoded it
-aws ssm put-parameter --name /ce-408/rds/endpoint --type String \
-  --value "$RDS_ENDPOINT" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter --name "/ce-408/rds/endpoint" --type String --value "$RDS_ENDPOINT" --overwrite
 # Re-register task defs with the new endpoint:
 sed -i "s/RDS_ENDPOINT_HERE/$RDS_ENDPOINT/g" catalog-taskdef.json orders-taskdef.json
 aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
