@@ -1,43 +1,93 @@
 # CE-408 — Auto-Scaling E-Commerce Backend with Chaos Engineering
 
-Build guide for the revised proposal (`CE408_Project_Proposal_Revised.md`).
-All resource IDs are in `vars.sh` — run `source vars.sh` at the start of every session.
+| | |
+|---|---|
+| **Members** | Ahmed Musharaf (2022067) · Abdullah Saeed (2022329) · Abdullah Zafar (2022328) |
+| **Instructor** | Miss Safia Baloch |
+| **Semester** | 8th |
+| **Course** | Cloud Computing (CE-408) |
+| **Inspiration** | https://aws.amazon.com/blogs/architecture/chaos-engineering-in-the-cloud/ |
+| **Live Demo** | http://ce-408-storefront-470337543459.s3-website-us-east-1.amazonaws.com/ |
+
+Build and run guide for the revised proposal (`CE408_Project_Proposal_Revised.md`).
+All resource IDs live in `vars.sh` — run `source vars.sh` at the start of every session.
 
 ---
 
 ## 1. Architecture
 
 ```
-   k6 EC2  ──►  ALB  ──►  /catalog/*  ──►  Catalog Fargate  ──►  RDS Postgres
-                      ──►  /cart/*     ──►  Cart    Fargate  ──►  DynamoDB
-                      ──►  /orders/*   ──►  Orders  Fargate  ──►  RDS Postgres + SQS
+   Browser ──► S3 Storefront (GIKI Mart)
+                     │ fetch()
+                     ▼
+   k6 EC2  ──►  ALB (ce-408-alb)
+                     │
+                     ├──  /catalog/*  ──►  Catalog Fargate  ──►  RDS Postgres (catalog DB)
+                     ├──  /cart/*     ──►  Cart    Fargate  ──►  DynamoDB (ce-408-cart-sessions)
+                     └──  /orders/*   ──►  Orders  Fargate  ──►  RDS Postgres (orders DB)
+                                                                        │
+                                                                        ▼
+                                                                  SQS (ce-408-orders-fulfilment)
 
-   chaos/kill-task.sh   ──►  task termination (ECS stop-task)
-   chaos/latency.sh     ──►  latency injection (env-var rollout)
-   CloudWatch           ──►  metrics, logs, alarms, dashboard (ce-408)
+   chaos/kill-task.sh  ──►  ECS task termination
+   chaos/latency.sh    ──►  500ms latency injection via env-var rollout
+   CloudWatch          ──►  metrics, logs, 3 alarms, 4-widget dashboard (ce-408)
 ```
 
-| Service | Compute | Data store |
-|---|---|---|
-| Catalog | Fargate (0.25 vCPU / 0.5 GB) | RDS Postgres `catalog` DB |
-| Cart | Fargate (0.25 vCPU / 0.5 GB) | DynamoDB `ce-408-cart-sessions` |
-| Orders | Fargate (0.25 vCPU / 0.5 GB) | RDS Postgres `orders` DB + SQS |
+### Service Mapping
+
+| Service | Compute | Data Store | Key Endpoints |
+|---|---|---|---|
+| Catalog | Fargate 0.25 vCPU / 0.5 GB | RDS Postgres `catalog` DB | `GET /catalog/products`, `GET /catalog/products/{sku}` |
+| Cart | Fargate 0.25 vCPU / 0.5 GB | DynamoDB `ce-408-cart-sessions` | `GET/POST /cart/sessions/{userId}/items` |
+| Orders | Fargate 0.25 vCPU / 0.5 GB | RDS Postgres `orders` DB + SQS | `POST /orders` |
+
+### API Contract
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `GET` | `/catalog/products` | — | `[{id, sku, name, price_cents, inventory}]` |
+| `GET` | `/catalog/products/{sku}` | — | `{id, sku, name, price_cents, inventory}` |
+| `GET` | `/cart/sessions/{userId}` | — | `{userId, items: [{sku, qty}]}` |
+| `POST` | `/cart/sessions/{userId}/items` | `{sku, qty}` | accumulates qty on existing line |
+| `PUT` | `/cart/sessions/{userId}/items/{sku}` | `{qty}` | sets absolute qty; `0` removes line |
+| `DELETE` | `/cart/sessions/{userId}` | — | clears cart |
+| `POST` | `/orders` | `{userId, items: [{sku, qty}]}` | `{orderId, total_cents, status}` |
+
+### What's Deferred to Future Work
+
+CloudFront, Route 53, Cognito, ElastiCache, X-Ray, React frontend, AZ-failure chaos, AWS FIS integration. See proposal §6.
 
 ---
 
 ## 2. Prerequisites
 
-| Tool | Verify |
-|---|---|
-| AWS CLI v2 | `aws --version` |
-| Docker Desktop | `docker --version` |
-| Python 3.11+ | `python --version` |
-| Git Bash | `bash --version` |
+### 2.1 Local Tools
+
+| Tool | Purpose | Verify |
+|---|---|---|
+| AWS CLI v2 | All AWS API calls | `aws --version` → `aws-cli/2.x` |
+| Docker Desktop | Build & push container images | `docker --version` |
+| Python 3.11+ | Service code | `python --version` |
+| Git Bash | Shell scripts (bash syntax) | `bash --version` |
 
 ```bash
 aws configure
-# Region: us-east-1 | Output: json
+# AWS Access Key ID:     <IAM user key>
+# AWS Secret Access Key: <secret>
+# Default region name:   us-east-1
+# Default output format: json
 ```
+
+### 2.2 Shell Variables
+
+Source at the start of every session:
+
+```bash
+source vars.sh
+```
+
+`vars.sh` contains all resource IDs (VPC, subnets, SGs, endpoints, ARNs). Never commit it — it's in `.gitignore`.
 
 ---
 
@@ -45,9 +95,15 @@ aws configure
 
 ### 3.1 VPC
 
-AWS Console → VPC → "Create VPC and more":
-- Name prefix: `ce-408`, CIDR: `10.0.0.0/16`
-- 2 AZs, 2 public + 2 private subnets, NAT Gateway: **1 AZ only**
+AWS Console → VPC → **"Create VPC and more"**:
+
+- Name prefix: `ce-408`
+- IPv4 CIDR: `10.0.0.0/16`
+- AZs: **2**, Public subnets: **2**, Private subnets: **2**
+- NAT Gateway: **In 1 AZ only** (single NAT saves cost)
+- VPC endpoints: none
+
+Tag the VPC and capture subnet IDs:
 
 ```bash
 VPC_ID=$(aws ec2 describe-vpcs \
@@ -55,7 +111,7 @@ VPC_ID=$(aws ec2 describe-vpcs \
   --query "Vpcs[0].VpcId" --output text)
 aws ec2 create-tags --resources $VPC_ID --tags Key=Project,Value=ce-408
 
-# List subnets to capture IDs into vars.sh
+# List subnets — capture public/private IDs into vars.sh
 aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
   --query "Subnets[].{ID:SubnetId,Name:Tags[?Key=='Name']|[0].Value,Public:MapPublicIpOnLaunch}" \
   --output table
@@ -63,27 +119,34 @@ aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
 
 ### 3.2 Security Groups
 
+Three SGs chained so each tier only accepts traffic from the previous tier:
+
 ```bash
-# ALB SG — open port 80
+# ALB SG — open port 80 to internet
 ALB_SG=$(aws ec2 create-security-group --group-name ce-408-alb-sg \
   --description "ALB ingress" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $ALB_SG \
   --protocol tcp --port 80 --cidr 0.0.0.0/0
+aws ec2 create-tags --resources $ALB_SG --tags Key=Project,Value=ce-408
 
-# Service SG — only ALB can reach 8000
+# Service SG — only ALB can reach port 8000
 SVC_SG=$(aws ec2 create-security-group --group-name ce-408-svc-sg \
   --description "Fargate services" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $SVC_SG \
   --protocol tcp --port 8000 --source-group $ALB_SG
+aws ec2 create-tags --resources $SVC_SG --tags Key=Project,Value=ce-408
 
-# RDS SG — only services can reach 5432
+# RDS SG — only services can reach port 5432
 RDS_SG=$(aws ec2 create-security-group --group-name ce-408-rds-sg \
   --description "RDS Postgres" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $RDS_SG \
   --protocol tcp --port 5432 --source-group $SVC_SG
+aws ec2 create-tags --resources $RDS_SG --tags Key=Project,Value=ce-408
 ```
 
 ### 3.3 IAM Roles
+
+Two roles: one for ECS task execution (pull images, write logs), one for runtime permissions (DynamoDB + SQS):
 
 ```bash
 cat > trust-ecs.json <<'EOF'
@@ -92,6 +155,7 @@ cat > trust-ecs.json <<'EOF'
     "Action": "sts:AssumeRole" } ] }
 EOF
 
+# Execution role
 aws iam create-role --role-name ce-408-ecs-exec \
   --assume-role-policy-document file://trust-ecs.json
 aws iam attach-role-policy --role-name ce-408-ecs-exec \
@@ -99,6 +163,7 @@ aws iam attach-role-policy --role-name ce-408-ecs-exec \
 aws iam attach-role-policy --role-name ce-408-ecs-exec \
   --policy-arn arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
 
+# Task role (least-privilege: only what services need)
 aws iam create-role --role-name ce-408-task-role \
   --assume-role-policy-document file://trust-ecs.json
 cat > task-policy.json <<EOF
@@ -125,6 +190,16 @@ for svc in catalog cart orders; do
 done
 ```
 
+### 3.5 Verification
+
+```bash
+aws ec2 describe-vpcs --filters "Name=tag:Project,Values=ce-408" --query "Vpcs[].VpcId"
+aws ecr describe-repositories --query "repositories[].repositoryName"
+aws iam list-roles --query "Roles[?starts_with(RoleName,'ce-408')].RoleName"
+```
+
+Expected: 1 VPC, 3 ECR repos, 2 IAM roles.
+
 ---
 
 ## 4. Phase 2 — Data Layer
@@ -132,14 +207,17 @@ done
 ### 4.1 RDS PostgreSQL
 
 ```bash
+# Generate a strong password and save it in vars.sh
 DB_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=')
-echo $DB_PASSWORD   # save this in vars.sh
+echo "export DB_PASSWORD=$DB_PASSWORD" >> vars.sh
 
+# DB subnet group across the 2 private subnets
 aws rds create-db-subnet-group \
   --db-subnet-group-name ce-408-db-subnets \
   --db-subnet-group-description "ce-408 RDS subnets" \
   --subnet-ids $PRIV_SUBNET_1 $PRIV_SUBNET_2
 
+# Single AZ, smallest burstable instance
 aws rds create-db-instance \
   --db-instance-identifier ce-408-postgres \
   --db-instance-class db.t4g.micro --engine postgres --engine-version 16.3 \
@@ -150,26 +228,30 @@ aws rds create-db-instance \
   --no-publicly-accessible --backup-retention-period 1 \
   --tags Key=Project,Value=ce-408
 
+# Wait ~10–15 min
 aws rds wait db-instance-available --db-instance-identifier ce-408-postgres
 
 RDS_ENDPOINT=$(aws rds describe-db-instances \
   --db-instance-identifier ce-408-postgres \
   --query "DBInstances[0].Endpoint.Address" --output text)
-echo $RDS_ENDPOINT   # save in vars.sh
+echo $RDS_ENDPOINT   # add to vars.sh
 ```
 
-### 4.2 Bootstrap Schema
+### 4.2 Schema Bootstrap
+
+Schema file `bootstrap.sql` creates two databases (`catalog`, `orders`), their tables, and seeds 3 products. Run it from the k6 EC2 once it's up (§9):
 
 ```bash
-# Run from local Git Bash once k6 EC2 is up (§9)
 ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP \
   "PGPASSWORD='$DB_PASSWORD' psql -h $RDS_ENDPOINT -U ce408admin -d postgres -f -" \
   < bootstrap.sql
 ```
 
-Schema is in `bootstrap.sql` — creates `catalog` and `orders` databases, tables, and seed products.
+If databases/tables already exist, psql will print duplicate errors — these are harmless.
 
 ### 4.3 DynamoDB
+
+On-demand billing — $0 when idle, no configuration needed after creation:
 
 ```bash
 aws dynamodb create-table \
@@ -180,35 +262,82 @@ aws dynamodb create-table \
   --tags Key=Project,Value=ce-408
 ```
 
+Cart items are stored as a nested map `{sku: qty}` under the `items` attribute.
+
 ### 4.4 SQS
 
 ```bash
-aws sqs create-queue --queue-name ce-408-orders-fulfilment \
+ORDERS_QUEUE_URL=$(aws sqs create-queue \
+  --queue-name ce-408-orders-fulfilment \
   --attributes VisibilityTimeout=60,MessageRetentionPeriod=345600 \
-  --tags Project=ce-408
+  --tags Project=ce-408 \
+  --query QueueUrl --output text)
+echo $ORDERS_QUEUE_URL   # add to vars.sh
+```
+
+### 4.5 Store Config in SSM
+
+Task definitions read secrets and endpoints from SSM at startup:
+
+```bash
+MSYS_NO_PATHCONV=1 aws ssm put-parameter \
+  --name "/ce-408/rds/password" --type SecureString --value "$DB_PASSWORD" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter \
+  --name "/ce-408/rds/endpoint" --type String --value "$RDS_ENDPOINT" --overwrite
+MSYS_NO_PATHCONV=1 aws ssm put-parameter \
+  --name "/ce-408/sqs/orders-url" --type String --value "$ORDERS_QUEUE_URL" --overwrite
 ```
 
 ---
 
 ## 5. Phase 3 — Microservices
 
-### 5.1 Structure
+### 5.1 Repository Layout
 
 ```
 ce-408-services/
-├── catalog/app/main.py   (FastAPI + asyncpg, GET /catalog/products)
-├── cart/app/main.py      (FastAPI + boto3 DynamoDB)
-├── orders/app/main.py    (FastAPI + asyncpg + SQS + CHAOS_LATENCY_MS middleware)
-├── */Dockerfile
-├── */requirements.txt
+├── catalog/
+│   ├── app/main.py         FastAPI + asyncpg
+│   ├── requirements.txt
+│   └── Dockerfile
+├── cart/
+│   ├── app/main.py         FastAPI + boto3 DynamoDB
+│   ├── requirements.txt
+│   └── Dockerfile
+├── orders/
+│   ├── app/main.py         FastAPI + asyncpg + SQS + chaos latency middleware
+│   ├── requirements.txt
+│   └── Dockerfile
 └── scripts/build-and-push.sh
 ```
 
-All services include `CORSMiddleware(allow_origins=["*"])` for the S3 storefront.
+### 5.2 Key Implementation Notes
 
-Orders service includes chaos latency middleware (activated by `CHAOS_LATENCY_MS` env var, default 0).
+**All three services** include:
+```python
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+```
+Required because the S3 storefront makes cross-origin requests to the ALB.
 
-### 5.2 Dockerfile Pattern
+**Cart `add_item`** uses a two-step DynamoDB update to handle the case where the `items` map doesn't exist yet:
+1. `if_not_exists` to initialise the map
+2. Separate update to set `#it.#sku = :qty`
+
+**Orders** includes a chaos latency middleware that sleeps `CHAOS_LATENCY_MS / 1000` seconds when the env var is set (default 0 — no overhead in production):
+```python
+CHAOS_LATENCY_MS = int(os.environ.get("CHAOS_LATENCY_MS", "0"))
+
+@app.middleware("http")
+async def inject_chaos_latency(request, call_next):
+    if CHAOS_LATENCY_MS:
+        await asyncio.sleep(CHAOS_LATENCY_MS / 1000)
+    return await call_next(request)
+```
+
+### 5.3 Dockerfile Pattern
+
+Same Dockerfile for all three services:
 
 ```dockerfile
 FROM python:3.11-slim
@@ -220,7 +349,7 @@ EXPOSE 8000
 CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
 ```
 
-### 5.3 Build and Push
+### 5.4 Build and Push to ECR
 
 ```bash
 cd ce-408-services
@@ -228,7 +357,18 @@ chmod +x scripts/build-and-push.sh
 ./scripts/build-and-push.sh
 ```
 
-Script logs into ECR, builds all three images, and pushes to `470337543459.dkr.ecr.us-east-1.amazonaws.com/ce-408/<svc>:latest`.
+The script logs into ECR, builds all three images, and pushes to:
+`470337543459.dkr.ecr.us-east-1.amazonaws.com/ce-408/<svc>:latest`
+
+To rebuild and redeploy a single service after a code change:
+
+```bash
+cd ce-408-services
+./scripts/build-and-push.sh
+aws ecs update-service --cluster ce-408-cluster --service ce-408-<svc> \
+  --force-new-deployment
+aws ecs wait services-stable --cluster ce-408-cluster --services ce-408-<svc>
+```
 
 ---
 
@@ -240,13 +380,16 @@ Script logs into ECR, builds all three images, and pushes to `470337543459.dkr.e
 aws ecs create-cluster --cluster-name ce-408-cluster \
   --capacity-providers FARGATE --tags key=Project,value=ce-408
 
-aws logs create-log-group --log-group-name "/ecs/ce-408"
-aws logs put-retention-policy --log-group-name "/ecs/ce-408" --retention-in-days 7
+# Per-service log groups with 7-day retention
+for svc in catalog cart orders; do
+  aws logs create-log-group --log-group-name "/ecs/ce-408-$svc"
+  aws logs put-retention-policy --log-group-name "/ecs/ce-408-$svc" --retention-in-days 7
+done
 ```
 
 ### 6.2 Task Definitions
 
-Task definition JSON files are in the project root (`catalog-taskdef.json`, `cart-taskdef.json`, `orders-taskdef.json`). Each uses 0.25 vCPU / 512 MB, pulls from ECR, and reads `DB_PASSWORD` from SSM.
+Task definition JSON files are in the project root (`catalog-taskdef.json`, `cart-taskdef.json`, `orders-taskdef.json`). Each uses **0.25 vCPU / 512 MB**, pulls from ECR, reads `DB_PASSWORD` from SSM, and writes logs to CloudWatch.
 
 ```bash
 aws ecs register-task-definition --cli-input-json file://catalog-taskdef.json
@@ -263,7 +406,7 @@ ALB_ARN=$(aws elbv2 create-load-balancer --name ce-408-alb \
   --security-groups $ALB_SG --tags Key=Project,Value=ce-408 \
   --query "LoadBalancers[0].LoadBalancerArn" --output text)
 
-# Target groups (one per service)
+# One target group per service — health check on /healthz
 for svc in catalog cart orders; do
   aws elbv2 create-target-group --name ce-408-$svc-tg \
     --protocol HTTP --port 8000 --vpc-id $VPC_ID --target-type ip \
@@ -271,12 +414,13 @@ for svc in catalog cart orders; do
     --tags Key=Project,Value=ce-408
 done
 
-# Listener with path-based routing
+# Default listener: 404 for unmatched paths
 LISTENER_ARN=$(aws elbv2 create-listener --load-balancer-arn $ALB_ARN \
   --protocol HTTP --port 80 \
   --default-actions Type=fixed-response,FixedResponseConfig='{StatusCode=404,ContentType=text/plain,MessageBody="not found"}' \
   --query "Listeners[0].ListenerArn" --output text)
 
+# Path-based routing rules
 aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 10 \
   --conditions Field=path-pattern,Values='/catalog/*' \
   --actions Type=forward,TargetGroupArn=$CATALOG_TG
@@ -286,7 +430,7 @@ aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 20 \
 aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 30 \
   --conditions Field=path-pattern,Values='/orders/*' \
   --actions Type=forward,TargetGroupArn=$ORDERS_TG
-# Exact /orders match (POST /orders body)
+# Exact match for POST /orders (pattern /orders/* won't match a body-less path)
 aws elbv2 create-rule --listener-arn $LISTENER_ARN --priority 31 \
   --conditions Field=path-pattern,Values='/orders' \
   --actions Type=forward,TargetGroupArn=$ORDERS_TG
@@ -308,11 +452,14 @@ for svc in catalog cart orders; do
     --tags key=Project,value=ce-408
 done
 
+# Wait for all three services to stabilize (5–10 min)
 aws ecs wait services-stable --cluster ce-408-cluster \
   --services ce-408-catalog ce-408-cart ce-408-orders
 ```
 
-### 6.5 Auto-Scaling (CPU target tracking at 60%)
+### 6.5 Auto-Scaling (CPU Target Tracking)
+
+Policy: scale out when average CPU > 60%, min 1 task / max 4 tasks per service.
 
 ```bash
 for svc in catalog cart orders; do
@@ -330,12 +477,13 @@ for svc in catalog cart orders; do
     --target-tracking-scaling-policy-configuration '{
       "TargetValue": 60.0,
       "PredefinedMetricSpecification": {"PredefinedMetricType": "ECSServiceAverageCPUUtilization"},
-      "ScaleOutCooldown": 60, "ScaleInCooldown": 120
+      "ScaleOutCooldown": 60,
+      "ScaleInCooldown": 120
     }'
 done
 ```
 
-> **Auto-scaling delay is expected:** CloudWatch needs ~3 consecutive minutes of CPU > 60% before the alarm fires, then Fargate takes ~2 min to provision the new task. Total detection-to-scale: **6–9 minutes**.
+> **Auto-scaling delay is expected:** CloudWatch evaluates CPU over ~3 consecutive minutes before the alarm fires, then Fargate takes ~2 min to provision the new task. Total detection-to-scale: **6–9 minutes**. This prevents thrashing on brief spikes.
 
 ### 6.6 Smoke Test
 
@@ -350,19 +498,22 @@ curl -X POST http://$ALB_DNS/orders \
   -d '{"userId":"u1","items":[{"sku":"SKU-001","qty":1}]}'
 ```
 
+All three should return 200 with JSON bodies. The ALB root `/` returns 404 — expected.
+
 ---
 
 ## 7. Phase 5 — Storefront (S3)
 
-Single-page HTML storefront at `storefront/index.html`. Deployed to S3 static website hosting. Uses `__ALB_DNS__` placeholder replaced at deploy time.
+Single-page HTML at `storefront/index.html` (GIKI Mart). No React, no build pipeline — one file, one bucket. Uses `__ALB_DNS__` as a placeholder replaced at deploy time.
 
-### 7.1 Create Bucket
+### 7.1 Create S3 Bucket
 
 ```bash
 BUCKET=ce-408-storefront-$ACCOUNT_ID
 aws s3api create-bucket --bucket $BUCKET --region us-east-1
 aws s3api put-public-access-block --bucket $BUCKET \
-  --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
+  --public-access-block-configuration \
+  "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
 aws s3api put-bucket-policy --bucket $BUCKET --policy "{
   \"Version\":\"2012-10-17\",
   \"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",
@@ -370,7 +521,7 @@ aws s3api put-bucket-policy --bucket $BUCKET --policy "{
 aws s3 website s3://$BUCKET --index-document index.html
 ```
 
-### 7.2 Deploy Storefront
+### 7.2 Deploy
 
 ```bash
 ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
@@ -383,7 +534,7 @@ echo "Storefront: http://$BUCKET.s3-website-us-east-1.amazonaws.com"
 
 ### 7.3 Update Storefront
 
-Edit `storefront/index.html`, then re-run the `sed` + `aws s3 cp` lines above. No build step. Cache-control is `no-cache` so reloads see the latest version.
+Edit `storefront/index.html`, then re-run the `sed` + `aws s3 cp` lines above. No build step needed. `cache-control: no-cache` ensures browsers fetch the latest version on reload.
 
 ---
 
@@ -391,14 +542,18 @@ Edit `storefront/index.html`, then re-run the `sed` + `aws s3 cp` lines above. N
 
 ### 8.1 Enable Container Insights
 
+Required for the **Task count per service** dashboard widget:
+
 ```bash
 aws ecs update-cluster-settings --cluster ce-408-cluster \
   --settings name=containerInsights,value=enabled
 ```
 
-Takes 2–3 minutes to start emitting data.
+Takes 2–3 minutes to start emitting data after enabling.
 
 ### 8.2 CloudWatch Dashboard
+
+Four widgets: ECS CPU, ALB request count + 5xx, task count per service, RDS CPU + SQS depth.
 
 ```bash
 cat > dashboard.json <<'EOF'
@@ -426,7 +581,7 @@ cat > dashboard.json <<'EOF'
 }
 EOF
 
-# Git Bash on Windows requires an explicit empty backup suffix for sed -i:
+# Git Bash on Windows: sed -i requires an explicit empty backup suffix
 LB_SUFFIX=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].LoadBalancerArn" --output text | awk -F'loadbalancer/' '{print $2}')
 sed -i "" "s|app/ce-408-alb/XXXX|$LB_SUFFIX|g" dashboard.json
@@ -438,19 +593,19 @@ aws cloudwatch put-dashboard --dashboard-name ce-408 \
 ### 8.3 Alarms
 
 ```bash
-# Alarm 1: ALB 5xx errors
+# ALB 5xx error rate
 aws cloudwatch put-metric-alarm --alarm-name ce-408-alb-5xx-high \
   --metric-name HTTPCode_Target_5XX_Count --namespace AWS/ApplicationELB \
   --statistic Sum --period 60 --threshold 10 --comparison-operator GreaterThanThreshold \
   --evaluation-periods 2 --dimensions Name=LoadBalancer,Value=$LB_SUFFIX
 
-# Alarm 2: Unhealthy targets
+# Unhealthy ALB targets
 aws cloudwatch put-metric-alarm --alarm-name ce-408-unhealthy-targets \
   --metric-name UnHealthyHostCount --namespace AWS/ApplicationELB \
   --statistic Maximum --period 60 --threshold 0 --comparison-operator GreaterThanThreshold \
   --evaluation-periods 1 --dimensions Name=LoadBalancer,Value=$LB_SUFFIX
 
-# Alarm 3: RDS CPU
+# RDS CPU
 aws cloudwatch put-metric-alarm --alarm-name ce-408-rds-cpu-high \
   --metric-name CPUUtilization --namespace AWS/RDS \
   --statistic Average --period 60 --threshold 80 --comparison-operator GreaterThanThreshold \
@@ -461,15 +616,22 @@ aws cloudwatch put-metric-alarm --alarm-name ce-408-rds-cpu-high \
 
 ## 9. Phase 7 — Load Generation (k6)
 
-### 9.1 k6 EC2
+### 9.1 EC2 Setup
 
 ```bash
+# Key pair
+aws ec2 create-key-pair --key-name ce-408-k6 \
+  --query "KeyMaterial" --output text > ce-408-k6.pem
+chmod 400 ce-408-k6.pem
+
+# Security group — SSH from your current IP only
 MY_IP=$(curl -s ifconfig.me)
 K6_SG=$(aws ec2 create-security-group --group-name ce-408-k6-sg \
   --description "k6 generator" --vpc-id $VPC_ID --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id $K6_SG \
   --protocol tcp --port 22 --cidr $MY_IP/32
 
+# Latest Amazon Linux 2023 AMI
 AMI=$(aws ec2 describe-images --owners amazon \
   --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
   --query "sort_by(Images,&CreationDate)[-1].ImageId" --output text)
@@ -480,7 +642,7 @@ aws ec2 run-instances --image-id $AMI --instance-type t3.micro \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=ce-408},{Key=Name,Value=ce-408-k6}]"
 ```
 
-> **Dynamic IP tip:** If SSH times out, your ISP may have changed your IP. Re-authorize or temporarily open to `0.0.0.0/0`, connect, then lock back down.
+> **Dynamic IP tip:** If SSH times out, your ISP may have rotated your IP since the SG rule was created. Get your current IP (`curl -s ifconfig.me`), revoke the old rule, and add a new one — or temporarily open to `0.0.0.0/0`, connect, then lock it back down.
 
 ```bash
 K6_PUBLIC_IP=$(aws ec2 describe-instances \
@@ -489,15 +651,16 @@ K6_PUBLIC_IP=$(aws ec2 describe-instances \
 ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP
 ```
 
-On the instance:
+On the instance, install tools:
 
 ```bash
 sudo dnf install -y postgresql15
 curl -L https://github.com/grafana/k6/releases/download/v0.52.0/k6-v0.52.0-linux-amd64.tar.gz | tar xz
 sudo mv k6-v0.52.0-linux-amd64/k6 /usr/local/bin/
+k6 version
 ```
 
-Allow k6 SG to reach RDS (run from local Git Bash):
+Allow k6 SG to reach RDS (run from **local** Git Bash):
 
 ```bash
 K6_SG=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=ce-408-k6-sg" \
@@ -508,9 +671,10 @@ aws ec2 authorize-security-group-ingress \
 
 ### 9.2 k6 Scripts
 
-Create these files on the k6 EC2 (SSH session):
+Create on the k6 EC2 (SSH session). Note: `$ALB_DNS` is not set inside SSH — paste the DNS value directly.
 
-**`baseline.js`** — 20 VUs, 5 min, catalog + cart:
+**`baseline.js`** — 20 VUs for 5 min, hits catalog + cart:
+
 ```javascript
 import http from 'k6/http';
 import { sleep, check } from 'k6';
@@ -528,7 +692,8 @@ export default function () {
 }
 ```
 
-**`spike.js`** — flash-sale shape, 200 VUs peak, orders:
+**`spike.js`** — flash-sale shape, ramps to 200 VUs, hammers orders:
+
 ```javascript
 import http from 'k6/http';
 export const options = {
@@ -548,6 +713,7 @@ export default function () {
 ```
 
 **`stress.js`** — catalog-heavy, use this to trigger auto-scaling:
+
 ```javascript
 import http from 'k6/http';
 export const options = {
@@ -561,7 +727,7 @@ const ALB = __ENV.ALB;
 export default function () { http.get(`${ALB}/catalog/products`); }
 ```
 
-Run from the EC2 (`$ALB_DNS` is not available in SSH — paste the DNS directly):
+Run:
 
 ```bash
 ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run baseline.js
@@ -569,44 +735,52 @@ ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run spike.js
 ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run stress.js
 ```
 
-**Reference results:**
-- Baseline (20 VUs, 5 min): 0% errors, p95 = 14ms, ~20 req/s
-- Spike (200 VUs, 3m45s): 0% errors, p95 = 9.3s, ~63 req/s
+### 9.3 Reference Results
+
+| Test | VUs | Duration | Error rate | p95 latency | Throughput |
+|---|---|---|---|---|---|
+| Baseline | 20 | 5 min | 0% | 14ms | ~20 req/s |
+| Spike (orders) | 200 peak | 3m45s | 0% | 9.3s | ~63 req/s |
+| Stress (catalog) | 100 peak | 5 min | 0% | — | — |
+
+Auto-scaling fired during `stress.js` — catalog task count went 1→2 after ~7 min of sustained high CPU.
 
 ---
 
 ## 10. Phase 8 — Chaos Experiments
 
-Scripts are in `chaos/`. Run from local Git Bash (they use the AWS CLI).
+Scripts are in `chaos/`. Run from **local** Git Bash (they call the AWS CLI). Before each experiment, start `baseline.js` in the SSH session so traffic is flowing during the event.
 
-### 10.1 Experiment 1 — Task Termination
+### 10.1 Experiment 1 — Task Termination (Catalog)
 
-Start baseline load in SSH session first:
 ```bash
+# SSH session — start baseline load
 ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run baseline.js
-```
 
-Then in local Git Bash:
-```bash
+# Local Git Bash — kill the task
 chmod +x chaos/kill-task.sh chaos/latency.sh
-./chaos/kill-task.sh catalog        # kills one Catalog task
-./chaos/kill-task.sh orders         # or kill an Orders task
+./chaos/kill-task.sh catalog
 ```
 
-**Hypothesis:** ALB removes dead target within 30s; ECS restores task within 90s; 5xx stays < 1%.
+Watch CloudWatch dashboard:
+- **Task count** drops from 1→0, recovers to 1 within ~90s
+- **5xx count** stays at 0 (ALB drained connections before failing requests)
 
-**Result:** Task count 0→1 between 17:45–17:47, 0 5xx, ~2 min recovery.
+**Hypothesis:** ALB removes dead target within 30s; ECS restores task within 90s; 5xx < 1%.
 
-### 10.2 Experiment 2 — Network Latency Injection
+**Actual result:** Task count 0→1 between 17:45–17:47, **0 5xx**, ~2 min full recovery.
 
-The chaos latency middleware is already in `orders/app/main.py` and deployed. `chaos/latency.sh` registers a new task definition with `CHAOS_LATENCY_MS=500`, deploys it, holds 180s, then auto-rolls back.
+### 10.2 Experiment 2 — Network Latency Injection (Orders, +500ms)
+
+The chaos middleware is already in `orders/app/main.py` and deployed. `chaos/latency.sh` registers a new Orders task definition with `CHAOS_LATENCY_MS=500`, deploys it, holds for 180s, then auto-rolls back to the clean definition.
 
 ```bash
 ./chaos/latency.sh                  # 500ms for 3 min (default)
 ./chaos/latency.sh 300 1000         # 1000ms for 5 min
 ```
 
-Poll orders latency while it runs:
+Poll orders response time while it runs:
+
 ```bash
 while true; do
   curl -s -o /dev/null -w "%{time_total}s\n" \
@@ -617,97 +791,103 @@ while true; do
 done
 ```
 
-**Result:** Baseline ~50ms → chaos avg ~550ms (11× increase), 0 5xx, auto-rollback at 180s.
+**Hypothesis:** Orders p95 rises from ~50ms to ~550ms; Cart/Catalog unaffected; auto-rollback restores baseline within 60s.
 
-### 10.3 Chaos Session for Resilience Report
+**Actual result:** Latency ~0.494s–1.057s (avg ~550ms, **11× baseline**), peak 3.6s during rolling deploy, **0 5xx**, Cart/Catalog unchanged.
 
-For each experiment:
+### 10.3 Chaos Session Procedure (for Resilience Report)
 
-1. Start `baseline.js` k6 from the EC2.
-2. Wait 60s — confirm dashboard: 1 task per service, ALB 5xx near zero.
+Run this sequence for each experiment:
+
+1. Start `baseline.js` on k6 EC2.
+2. Wait 60s — confirm dashboard: 1 task/service, 5xx near zero, CPU stable.
 3. Run the chaos script.
-4. Note time of first signal and time of full recovery.
+4. Note: time of first signal (task count dip / latency spike) and time of full recovery.
 5. Stop k6.
-6. Record recovery time and peak error/latency in `resilience-report.html`.
+6. Record metrics in `resilience-report.html` → print as `resilience-report.pdf`.
 
-> **Why scripted, not FIS?** FIS requires a paid tier. Same two experiments are implemented via direct ECS API calls — dashboard signatures are identical. A FIS migration is in Future Work in the proposal.
+> **Why scripted chaos instead of AWS FIS?** FIS requires a paid AWS account tier. The same two experiments are implemented via direct ECS API calls — the CloudWatch dashboard signatures are identical to what FIS would produce. Task termination triggers ALB target replacement; env-var rollout injects latency on every Orders task. A FIS migration path is documented in Future Work (proposal §6).
 
 ---
 
 ## 11. Phase 9 — Demo Runbook (Viva)
 
-**Duration: 5–8 minutes.** Full video guide in `demo.md`.
+**Duration: 5–8 minutes.** Full video guide with commands also in `demo.md`.
 
-### Before Recording (5 min before)
+### Pre-Flight (5 min before)
 
 Open on separate screens:
-1. **CloudWatch** → Dashboards → `ce-408` (Last 30 min, refresh 10s)
-2. **Storefront** — S3 website URL
+1. **CloudWatch** → Dashboards → `ce-408` (Last 30 min, auto-refresh 10s)
+2. **Storefront** — S3 website URL (GIKI Mart)
+3. **Git Bash** terminal in project root (SSH to k6 EC2 ready)
 
-Start baseline load in SSH session:
+Start baseline load in SSH session and wait 60s:
+
 ```bash
 ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run baseline.js
 ```
-Wait 60s for dashboard to show live data.
 
 ---
 
-### 0:00 — Architecture (1 min)
+### 0:00 — Architecture Overview (1 min)
 
 Show the architecture diagram from §1.
 
-*"Three microservices on ECS Fargate behind an ALB. RDS, DynamoDB, SQS. Observable via CloudWatch."*
+*"Three microservices — Catalog, Cart, Orders — on ECS Fargate behind an Application Load Balancer. RDS PostgreSQL for transactional data, DynamoDB for session storage, SQS for order fulfilment events. All observable via this CloudWatch dashboard."*
 
 ---
 
 ### 1:00 — Normal Operation (1.5 min)
 
-Switch to storefront:
-1. Browse products
-2. Add 2 items to cart
-3. Place an order — show success modal
-4. Point at dashboard: **1 task per service, 0 5xx, ~14ms latency**
+Switch to the storefront. Do live:
+1. Browse the product catalog
+2. Add 2 different items to cart
+3. Place an order — show the success modal
+4. Switch to CloudWatch — point at: **1 task per service, 0 5xx, ~14ms p95 latency**
 
-*"Under 20 VUs the stack handles requests in under 14ms p95 with zero errors."*
+*"Under 20 VUs, requests complete in under 14ms p95 with zero errors."*
 
 ---
 
 ### 2:30 — Auto-Scaling (2 min)
 
-Stop baseline (Ctrl+C). Start stress test in SSH:
+Stop baseline (Ctrl+C in SSH). Start stress test:
+
 ```bash
 ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run stress.js
 ```
 
-Wait ~4 min. Point at dashboard: **CPU climbs → task count 1→2**.
+Wait ~4 minutes. Point at CloudWatch: **ECS CPU climbs above 60% → task count 1→2**.
 
-*"CPU crossed 60% — auto-scaling fired. A second task spun up automatically. No manual intervention. Detection-to-scale is ~6-9 min by design to avoid thrashing."*
+*"CPU crossed the 60% threshold. Auto-scaling fired — a second Catalog task spun up automatically. CloudWatch needs ~3 min of sustained CPU to confirm the alarm, then Fargate takes ~2 min to provision. Total: 6–9 min by design to prevent thrashing on brief spikes."*
 
 ---
 
 ### 4:30 — Chaos: Task Kill (1.5 min)
 
 In local Git Bash:
+
 ```bash
 ./chaos/kill-task.sh catalog
 ```
 
 Watch dashboard: task count dips to 0, recovers to 1 within ~2 min.
 
-*"We just killed the Catalog service. ECS detected it, replaced it, and the ALB re-routed traffic — zero 5xx errors. Self-healed in under 2 minutes."*
+*"We just terminated the Catalog service. ECS detected it within 30s, the ALB drained connections before failing any requests, and a replacement task was running within 2 minutes — zero 5xx errors throughout."*
 
 ---
 
 ### 6:00 — Chaos: Latency Injection (1.5 min)
 
 In local Git Bash:
+
 ```bash
 ./chaos/latency.sh 180 500
 ```
 
-In another terminal, show curl loop — latency jumps from **~0.05s → ~0.55s**.
+In another terminal, show the curl loop — response times jump from **~0.05s → ~0.55s**.
 
-*"500ms injected into Orders. 11× latency increase, zero errors, Cart and Catalog unaffected. Script auto-rolls back after 3 minutes."*
+*"500ms of artificial latency injected into Orders. Response times jumped 11×. Cart and Catalog are completely unaffected — they don't call Orders synchronously. The script auto-rolls back after 3 minutes."*
 
 ---
 
@@ -715,23 +895,24 @@ In another terminal, show curl loop — latency jumps from **~0.05s → ~0.55s**
 
 Show `resilience-report.pdf`.
 
-*"Both experiments confirm zero user-visible errors under failure, automatic recovery, and full fault isolation."*
+*"Both chaos experiments confirm zero user-visible errors under failure conditions, automatic recovery without manual intervention, and full fault isolation between services."*
 
 ---
 
-### Key Numbers to Remember
+### Key Numbers to Know
 
 | Metric | Value |
 |---|---|
-| Baseline p95 | 14ms |
-| Spike error rate | 0% at 200 VUs |
-| Task kill recovery | ~2 min |
-| Latency injection | 50ms → 550ms, auto-rollback |
-| Auto-scaling trigger | CPU > 60% for ~3 min |
+| Baseline p95 latency | 14ms |
+| Spike test (200 VUs) error rate | 0% |
+| Task kill recovery time | ~2 min |
+| Latency injection effect | 50ms → 550ms (11×) |
+| Auto-scaling trigger | CPU > 60% sustained for ~3 min |
+| Auto-scaling total time | 6–9 min (detection + provisioning) |
 
 ---
 
-> Have **two backup screenshots** of a successful run (dashboard + storefront) in case AWS misbehaves on the day.
+> Have **two backup screenshots** of a successful run (dashboard + storefront) in case AWS misbehaves on the day. A clickable storefront lands harder than a `curl` in front of the examiner.
 
 ---
 
