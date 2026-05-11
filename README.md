@@ -732,3 +732,7 @@ Show `resilience-report.pdf`.
 ---
 
 > Have **two backup screenshots** of a successful run (dashboard + storefront) in case AWS misbehaves on the day.
+
+---
+
+Good luck with the submission! 😊
