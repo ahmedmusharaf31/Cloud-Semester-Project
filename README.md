@@ -747,7 +747,7 @@ The storefront expects these endpoints. Implement any that don't exist yet:
 | `POST` | `/cart/sessions/{userId}/items` | `{sku, qty}` | adds `qty` to existing line (positive only) |
 | `PUT` | `/cart/sessions/{userId}/items/{sku}` | `{qty}` | sets absolute qty; `0` removes the line |
 | `DELETE` | `/cart/sessions/{userId}` | — | clears the cart |
-| `POST` | `/orders` | `{userId, items: [{sku, qty}]}` | `{orderId, total_cents, status}` |
+| `POST` | `/orders` | `{userId, items: {sku: qty}}` | `{orderId, total_cents, status}` |
 
 ### 7.3 The storefront — `storefront/index.html`
 
