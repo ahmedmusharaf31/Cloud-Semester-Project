@@ -1395,14 +1395,29 @@ aws cloudwatch put-dashboard --dashboard-name ce-408 \
 ### 7.2 Alarms
 
 ```bash
+# Alarm 1: ALB 5xx errors
 aws cloudwatch put-metric-alarm --alarm-name ce-408-alb-5xx-high \
   --metric-name HTTPCode_Target_5XX_Count --namespace AWS/ApplicationELB \
   --statistic Sum --period 60 --threshold 10 --comparison-operator GreaterThanThreshold \
   --evaluation-periods 2 \
   --dimensions Name=LoadBalancer,Value=$LB_SUFFIX
+
+# Alarm 2: Unhealthy targets
+aws cloudwatch put-metric-alarm --alarm-name ce-408-unhealthy-targets \
+  --metric-name UnHealthyHostCount --namespace AWS/ApplicationELB \
+  --statistic Maximum --period 60 --threshold 0 --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 1 \
+  --dimensions Name=LoadBalancer,Value=$LB_SUFFIX
+
+# Alarm 3: RDS CPU
+aws cloudwatch put-metric-alarm --alarm-name ce-408-rds-cpu-high \
+  --metric-name CPUUtilization --namespace AWS/RDS \
+  --statistic Average --period 60 --threshold 80 --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 2 \
+  --dimensions Name=DBInstanceIdentifier,Value=ce-408-postgres
 ```
 
-(Add a SNS topic + email subscription if you want push alerts.)
+(Add an SNS topic + email subscription if you want push alerts.)
 
 ---
 
