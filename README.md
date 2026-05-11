@@ -1593,25 +1593,14 @@ proposal §6 (Future Work).
 
 ### 10.1 Experiment 1 — Task termination
 
-Save as `chaos/kill-task.sh`:
+Script is already in the repo at `chaos/kill-task.sh`. Before running, start the baseline load in the SSH session so traffic is flowing during the experiment:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-SVC=${1:-catalog}
-CLUSTER=ce-408-cluster
-TASK=$(aws ecs list-tasks --cluster $CLUSTER \
-  --service-name ce-408-$SVC \
-  --query "taskArns[0]" --output text)
-[ "$TASK" = "None" ] && { echo "no running task for $SVC"; exit 1; }
-echo "Killing $TASK"
-aws ecs stop-task --cluster $CLUSTER --task "$TASK" \
-  --reason "chaos: scripted task termination"
-echo "Stopped. Watch the dashboard — ALB target should mark unhealthy within ~30s,"
-echo "and auto-scaling should restore baseline within ~90s."
+# In SSH session (k6 EC2):
+ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run baseline.js
 ```
 
-Run it:
+Then in local Git Bash, kill the catalog task:
 
 ```bash
 chmod +x chaos/kill-task.sh
@@ -1628,66 +1617,9 @@ during the event because there's still a healthy task to serve traffic.
 
 ### 10.2 Experiment 2 — Network latency injection
 
-Latency is injected by setting an env var on the Orders service that
-activates a tiny middleware. First, add the middleware once (in
-`orders/app/main.py`, near the top):
+The chaos latency middleware is already in `orders/app/main.py` and deployed. The script is already in the repo at `chaos/latency.sh`. It registers a new task definition with `CHAOS_LATENCY_MS` set, deploys it, waits, then rolls back automatically.
 
-```python
-import os, asyncio
-CHAOS_LATENCY_MS = int(os.environ.get("CHAOS_LATENCY_MS", "0"))
-
-@app.middleware("http")
-async def inject_chaos_latency(request, call_next):
-    if CHAOS_LATENCY_MS:
-        await asyncio.sleep(CHAOS_LATENCY_MS / 1000)
-    return await call_next(request)
-```
-
-Rebuild and push the Orders image once with this middleware in place:
-
-```bash
-cd ce-408-services && ./scripts/build-and-push.sh
-aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
-  --force-new-deployment
-```
-
-Now the chaos script flips the env var on, waits, and rolls back. Save as
-`chaos/latency.sh`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-DURATION_S=${1:-180}     # default: 3 minutes
-LATENCY_MS=${2:-500}     # default: 500 ms
-
-CLEAN_TD_ARN=$(aws ecs describe-task-definition --task-definition ce-408-orders \
-  --query "taskDefinition.taskDefinitionArn" --output text)
-echo "Clean task def: $CLEAN_TD_ARN"
-
-# Re-register the same task def with CHAOS_LATENCY_MS injected
-aws ecs describe-task-definition --task-definition ce-408-orders \
-  --query "taskDefinition" \
-  | jq --arg ms "$LATENCY_MS" '
-      .containerDefinitions[0].environment += [{"name":"CHAOS_LATENCY_MS","value":$ms}]
-      | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
-            .compatibilities,.registeredAt,.registeredBy)
-    ' > /tmp/orders-chaos.json
-CHAOS_TD=$(aws ecs register-task-definition --cli-input-json file:///tmp/orders-chaos.json \
-  --query "taskDefinition.taskDefinitionArn" --output text)
-echo "Chaos task def: $CHAOS_TD"
-
-aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
-  --task-definition $CHAOS_TD --force-new-deployment
-echo "${LATENCY_MS}ms latency injected on Orders. Holding for ${DURATION_S}s..."
-sleep $DURATION_S
-
-echo "Rolling back to clean task def..."
-aws ecs update-service --cluster ce-408-cluster --service ce-408-orders \
-  --task-definition $CLEAN_TD_ARN --force-new-deployment
-echo "Rolled back. Latency should return to baseline within ~60s."
-```
-
-Run it:
+Run from local Git Bash:
 
 ```bash
 chmod +x chaos/latency.sh

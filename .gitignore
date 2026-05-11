@@ -5,6 +5,7 @@ __pycache__/
 
 # Build intermediates
 storefront/index.deploy.html
+orders-chaos.json
 
 # AWS / secrets — never commit
 *.pem
