@@ -1386,11 +1386,21 @@ EOF
 # Replace the LB suffix in the JSON (CloudWatch needs the app/<name>/<id> form):
 LB_SUFFIX=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].LoadBalancerArn" --output text | awk -F'loadbalancer/' '{print $2}')
-sed -i "s|app/ce-408-alb/XXXX|$LB_SUFFIX|g" dashboard.json
+# Git Bash on Windows requires an explicit empty backup suffix:
+sed -i "" "s|app/ce-408-alb/XXXX|$LB_SUFFIX|g" dashboard.json
 
 aws cloudwatch put-dashboard --dashboard-name ce-408 \
   --dashboard-body file://dashboard.json
 ```
+
+The "Task count per service" widget uses `ECS/ContainerInsights` metrics which require Container Insights to be enabled on the cluster. Enable it once:
+
+```bash
+aws ecs update-cluster-settings --cluster ce-408-cluster \
+  --settings name=containerInsights,value=enabled
+```
+
+Container Insights takes 2–3 minutes to start emitting data after enabling.
 
 ### 7.2 Alarms
 
@@ -1457,6 +1467,14 @@ K6_PUBLIC_IP=$(aws ec2 describe-instances \
   --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
 ssh -i ce-408-k6.pem ec2-user@$K6_PUBLIC_IP
 ```
+
+> **Dynamic IP tip**: If SSH times out, your ISP may have changed your IP since the SG rule was created. Re-authorize with your current IP:
+> ```bash
+> MY_IP=$(curl -s ifconfig.me)
+> aws ec2 authorize-security-group-ingress --group-id $K6_SG \
+>   --protocol tcp --port 22 --cidr $MY_IP/32
+> ```
+> If still timing out, temporarily open to `0.0.0.0/0`, connect, then lock back down.
 
 On the instance:
 
@@ -1526,15 +1544,40 @@ export default function () {
 }
 ```
 
-Run from the EC2:
+Run from the EC2 (the `$ALB_DNS` variable is not available inside the SSH session — paste the DNS value directly):
 
 ```bash
-ALB="http://$ALB_DNS" k6 run baseline.js
-ALB="http://$ALB_DNS" k6 run spike.js
+ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run baseline.js
+ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run spike.js
 ```
 
-Watch the CloudWatch dashboard while it runs — Catalog and Orders should
-scale out from 1 → 2+ tasks during the spike.
+**Baseline reference results** (20 VUs, 5 min): 0% errors, p95 = 14ms, ~20 req/s.
+**Spike reference results** (200 VUs, 3m45s): 0% errors, p95 = 9.3s, ~63 req/s.
+
+`stress.js` (catalog-heavy — use this to trigger and demonstrate auto-scaling):
+
+```javascript
+import http from 'k6/http';
+export const options = {
+  stages: [
+    { duration: '1m', target: 50 },
+    { duration: '3m', target: 100 },
+    { duration: '1m', target: 0 },
+  ]
+};
+const ALB = __ENV.ALB;
+export default function () {
+  http.get(`${ALB}/catalog/products`);
+}
+```
+
+```bash
+ALB="http://ce-408-alb-390225980.us-east-1.elb.amazonaws.com" k6 run stress.js
+```
+
+Watch the CloudWatch dashboard while it runs — Catalog CPU climbs above 60%, triggering scale-out from 1→2 tasks.
+
+> **Auto-scaling delay is expected**: CloudWatch needs ~3 consecutive minutes of CPU > 60% before the alarm fires, then Fargate takes ~2 min to provision the new task. Total detection-to-scale: **6–9 minutes**. This is intentional to prevent thrashing on brief spikes.
 
 ---
 
