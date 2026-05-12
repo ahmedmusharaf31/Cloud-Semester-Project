@@ -7,6 +7,11 @@ __pycache__/
 storefront/index.deploy.html
 orders-chaos.json
 
+# Storefront (Vite) build + deps
+storefront/node_modules/
+storefront/dist/
+storefront/config.deploy.js
+
 # AWS / secrets — never commit
 *.pem
 vars.sh

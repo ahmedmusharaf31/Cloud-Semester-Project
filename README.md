@@ -504,7 +504,7 @@ All three should return 200 with JSON bodies. The ALB root `/` returns 404 — e
 
 ## 7. Phase 5 — Storefront (S3)
 
-Single-page HTML at `storefront/index.html` (GIKI Mart). No React, no build pipeline — one file, one bucket. Uses `__ALB_DNS__` as a placeholder replaced at deploy time.
+Vite + React + TypeScript + Tailwind app in `storefront/` (GIKI Mart). Build produces a static `dist/` bundle served from one S3 bucket. Runtime config lives in `storefront/public/config.js`, which Vite copies verbatim into `dist/config.js` — it uses `__ALB_DNS__` as a placeholder replaced at deploy time, identical to the original single-file flow. The pre-React single-file version is kept at `storefront/index.legacy.html` for reference.
 
 ### 7.1 Create S3 Bucket
 
@@ -521,20 +521,36 @@ aws s3api put-bucket-policy --bucket $BUCKET --policy "{
 aws s3 website s3://$BUCKET --index-document index.html
 ```
 
-### 7.2 Deploy
+### 7.2 Build + Deploy
 
 ```bash
+# Build the static bundle (outputs storefront/dist/)
+cd storefront
+npm ci
+npm run build
+cd ..
+
+# Replace the __ALB_DNS__ placeholder in the copied config.js
 ALB_DNS=$(aws elbv2 describe-load-balancers --names ce-408-alb \
   --query "LoadBalancers[0].DNSName" --output text)
-sed "s/__ALB_DNS__/$ALB_DNS/g" storefront/index.html > storefront/index.deploy.html
-aws s3 cp storefront/index.deploy.html s3://$BUCKET/index.html \
+sed -i "s/__ALB_DNS__/$ALB_DNS/g" storefront/dist/config.js
+
+# Upload: hashed assets cache forever, entry files stay no-cache
+aws s3 sync storefront/dist s3://$BUCKET --delete \
+  --exclude "index.html" --exclude "config.js" \
+  --cache-control "public,max-age=31536000,immutable"
+aws s3 cp storefront/dist/index.html s3://$BUCKET/index.html \
   --content-type "text/html" --cache-control "no-cache"
+aws s3 cp storefront/dist/config.js s3://$BUCKET/config.js \
+  --content-type "application/javascript" --cache-control "no-cache"
 echo "Storefront: http://$BUCKET.s3-website-us-east-1.amazonaws.com"
 ```
 
+`assets/` filenames are content-hashed, so they're safe to cache forever; `index.html` and `config.js` stay `no-cache` so reloads always pick up the latest bundle and ALB DNS.
+
 ### 7.3 Update Storefront
 
-Edit `storefront/index.html`, then re-run the `sed` + `aws s3 cp` lines above. No build step needed. `cache-control: no-cache` ensures browsers fetch the latest version on reload.
+Edit files under `storefront/src/`, then re-run the `npm run build` + `sed` + `aws s3 sync`/`cp` block above. To preview the production build locally before deploying: `cd storefront && npm run build && npm run preview`. With the placeholder left unreplaced, the app falls back to `localStorage` and a one-time prompt for the API base.
 
 ---
 
