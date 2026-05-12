@@ -13,7 +13,14 @@ CREATE TABLE products (
 INSERT INTO products (sku, name, price_cents, inventory) VALUES
   ('SKU-001','Wireless Mouse',2499,100),
   ('SKU-002','USB-C Hub',3999,50),
-  ('SKU-003','Mechanical Keyboard',8999,25);
+  ('SKU-003','Mechanical Keyboard',8999,25),
+  ('SKU-004','Noise-Cancelling Headphones',14999,40),
+  ('SKU-005','Bluetooth Speaker',6499,60),
+  ('SKU-006','4K Webcam',7999,35),
+  ('SKU-007','27-inch 4K Monitor',24999,18),
+  ('SKU-008','Portable SSD Drive',10999,45),
+  ('SKU-009','Adjustable Desk Stand',4499,8),
+  ('SKU-010','65W USB-C Charger',2999,90);
 
 \c orders
 CREATE TABLE orders (
