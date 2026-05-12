@@ -11,6 +11,9 @@ orders-chaos.json
 storefront/node_modules/
 storefront/dist/
 storefront/config.deploy.js
+storefront/*.tsbuildinfo
+storefront/vite.config.d.ts
+storefront/vite.config.js
 
 # AWS / secrets — never commit
 *.pem
